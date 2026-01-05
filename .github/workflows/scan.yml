@@ -1,10 +1,17 @@
       - name: Run Scan
         run: |
-          # Find subdomains
-          subfinder -d web-zaim.ru -o subs.txt
+          # 1. Define the target from the n8n input
+          TARGET="${{ github.event.inputs.target }}"
+          HEADER="X-BugBounty: 0a526762-8467-4d46-a403-af4e79283f46"
           
-          # Check which ones are alive (Adding the required Header)
-          httpx -l subs.txt -H "X-BugBounty: 0a526762-8467-4d46-a403-af4e79283f46" -o live.txt
+          echo "Starting scan for: $TARGET"
+
+          # 2. Find subdomains
+          subfinder -d $TARGET -o subs.txt
           
-          # Scan for Critical/High bugs (Rate limited to 5 req/s as per rules)
-          nuclei -l live.txt -H "X-BugBounty: 0a526762-8467-4d46-a403-af4e79283f46" -rate-limit 5 -severity critical,high -o results.txt
+          # 3. Check which ones are alive (Adding the required Header)
+          httpx -l subs.txt -H "$HEADER" -o live.txt
+          
+          # 4. Scan for Critical/High bugs (Rate limited to 5 req/s per Webzaim rules)
+          nuclei -l live.txt -H "$HEADER" -rate-limit 5 -severity critical,high -o results.txt
+          
