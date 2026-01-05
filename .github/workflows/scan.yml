@@ -1,17 +1,39 @@
+name: Bug Bounty Recon
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Target Domain'
+        required: true
+        default: 'web-zaim.ru'
+
+jobs:
+  recon:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install ProjectDiscovery Tools
+        run: |
+          go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+          go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+          go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+          sudo mv ~/go/bin/* /usr/local/bin/
+
       - name: Run Scan
         run: |
-          # 1. Define the target from the n8n input
           TARGET="${{ github.event.inputs.target }}"
           HEADER="X-BugBounty: 0a526762-8467-4d46-a403-af4e79283f46"
           
           echo "Starting scan for: $TARGET"
 
-          # 2. Find subdomains
+          # Find subdomains
           subfinder -d $TARGET -o subs.txt
           
-          # 3. Check which ones are alive (Adding the required Header)
+          # Check which ones are alive (Adding the required Header)
           httpx -l subs.txt -H "$HEADER" -o live.txt
           
-          # 4. Scan for Critical/High bugs (Rate limited to 5 req/s per Webzaim rules)
+          # Scan for Critical/High bugs (Rate limited to 5 req/s per Webzaim rules)
           nuclei -l live.txt -H "$HEADER" -rate-limit 5 -severity critical,high -o results.txt
           
