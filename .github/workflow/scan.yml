@@ -1,26 +1,10 @@
-name: Subdomain Scan
-on:
-  workflow_dispatch:
-    inputs:
-      target:
-        description: 'Target Domain'
-        required: true
-jobs:
-  recon:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Install Subfinder & Nuclei
-        run: |
-          go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
-          go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
-          sudo mv ~/go/bin/* /usr/local/bin/
       - name: Run Scan
         run: |
-          subfinder -d ${{ github.event.inputs.target }} -o subs.txt
-          nuclei -l subs.txt -severity critical,high -o results.txt
-      - name: Upload Results
-        uses: actions/upload-artifact@v4
-        with:
-          name: recon-results
-          path: results.txt
+          # Find subdomains
+          subfinder -d web-zaim.ru -o subs.txt
           
+          # Check which ones are alive (Adding the required Header)
+          httpx -l subs.txt -H "X-BugBounty: 0a526762-8467-4d46-a403-af4e79283f46" -o live.txt
+          
+          # Scan for Critical/High bugs (Rate limited to 5 req/s as per rules)
+          nuclei -l live.txt -H "X-BugBounty: 0a526762-8467-4d46-a403-af4e79283f46" -rate-limit 5 -severity critical,high -o results.txt
