@@ -1,4 +1,4 @@
-name: Bug Bounty Recon
+name: Bug Bounty Advanced Recon
 on:
   workflow_dispatch:
     inputs:
@@ -8,32 +8,46 @@ on:
         default: 'web-zaim.ru'
 
 jobs:
-  recon:
+  advanced-scan:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Install ProjectDiscovery Tools
+      - name: Setup Go & Install Tools
         run: |
           go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
           go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
           go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
           sudo mv ~/go/bin/* /usr/local/bin/
 
-      - name: Run Scan
+      - name: Execute Smart Recon
         run: |
           TARGET="${{ github.event.inputs.target }}"
           HEADER="X-BugBounty: 0a526762-8467-4d46-a403-af4e79283f46"
           
-          echo "Starting scan for: $TARGET"
+          # 1. Passive Subdomain Discovery
+          subfinder -d $TARGET -all -silent -o subs.txt
+          
+          # 2. Live Probing with Tech Detection
+          httpx -l subs.txt -H "$HEADER" -silent -td -title -status-code -o live.txt
+          
+          # 3. Targeted Nuclei Scan (Optimized to prevent cancellation)
+          # We limit concurrency to 2 and bulk-size to 1 to keep memory low and stay under 5 req/s
+          nuclei -l live.txt \
+            -H "$HEADER" \
+            -severity critical,high \
+            -rate-limit 5 \
+            -bulk-size 1 \
+            -concurrency 2 \
+            -stats \
+            -o results.txt
 
-          # Find subdomains
-          subfinder -d $TARGET -o subs.txt
-          
-          # Check which ones are alive (Adding the required Header)
-          httpx -l subs.txt -H "$HEADER" -o live.txt
-          
-          # Scan for Critical/High bugs (Rate limited to 5 req/s per Webzaim rules)
-          nuclei -l live.txt -H "$HEADER" -rate-limit 5 -severity critical,high -o results.txt
-          
+      - name: Upload Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: scan-results-${{ github.event.inputs.target }}
+          path: |
+            live.txt
+            results.txt
+            
