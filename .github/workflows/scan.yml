@@ -1,9 +1,9 @@
-name: Flowwow-Max-Elite-Bounty
+name: Flowwow-Complete
 on:
   workflow_dispatch:
     inputs:
       target:
-        description: 'Primary Target (flowwow.com)'
+        description: 'Target (default: flowwow.com)'
         required: true
         default: 'flowwow.com'
 
@@ -11,100 +11,98 @@ jobs:
   exploit-hunt:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Install Advanced Arsenal
+      - name: Install Maximum Arsenal
         run: |
-          sudo apt-get update && sudo apt-get install -y openvpn python3-requests curl
+          sudo apt-get update && sudo apt-get install -y openvpn python3-requests curl grep
+          # Recon & Probing
           go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
           go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+          # Vulnerability & Logic Tools
           go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
           go install -v github.com/projectdiscovery/katana/cmd/katana@latest
+          go install -v github.com/lc/gau/v2/cmd/gau@latest
           pip install arjun
           sudo mv ~/go/bin/* /usr/local/bin/
 
       - name: Relentless VPN Connection Loop
         shell: bash
         run: |
-          INITIAL_IP=$(curl -s https://ifconfig.me)
-          echo "Initial IP: $INITIAL_IP"
+          INITIAL_IP=$(curl -s --max-time 10 https://ifconfig.me || echo "0.0.0.0")
           CONNECTED=false
           ATTEMPT=1
-          MAX_ATTEMPTS=10
-
-          while [ "$CONNECTED" = false ] && [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
-            echo "VPN Connection Attempt #$ATTEMPT..."
-            
-            # 1. Fetch a fresh VPN config using the Padding-Fixed Python script
+          while [ "$CONNECTED" = false ] && [ $ATTEMPT -le 15 ]; do
+            echo "VPN Attempt #$ATTEMPT..."
             python3 -c "
-          import requests, base64, binascii, random
+          import requests, base64, random
           try:
-              r = requests.get('https://www.vpngate.net/api/iphone/', timeout=10)
+              r = requests.get('https://www.vpngate.net/api/iphone/', timeout=15)
               servers = [line for line in r.text.split('\n') if not line.startswith('*') and len(line) > 10]
-              # Pick a random server from the top 15 for better luck
-              data = random.choice(servers[:15]).split(',')
+              random.shuffle(servers)
+              data = servers[0].split(',')
               b64_str = data[-1].strip()
               missing_padding = len(b64_str) % 4
               if missing_padding: b64_str += '=' * (4 - missing_padding)
               with open('auto.ovpn', 'wb') as f: f.write(base64.b64decode(b64_str))
-          except Exception as e: exit(1)
+          except: exit(1)
           "
-            
-            # 2. Try to connect in the background
             sudo killall openvpn 2>/dev/null || true
-            sudo openvpn --config auto.ovpn --daemon
-            sleep 30  # Wait for handshake
-            
-            # 3. Verify IP change
+            sudo openvpn --config auto.ovpn --daemon --log vpn.log
+            sleep 30
             CURRENT_IP=$(curl -s --max-time 10 https://ifconfig.me || echo "FAILED")
-            
             if [ "$CURRENT_IP" != "FAILED" ] && [ "$CURRENT_IP" != "$INITIAL_IP" ]; then
-              echo "✅ VPN Connected Successfully! New IP: $CURRENT_IP"
-              CONNECTED=true
+              echo "✅ VPN Connected! IP: $CURRENT_IP"; CONNECTED=true
             else
-              echo "❌ Attempt #$ATTEMPT failed. Retrying with different server..."
-              ATTEMPT=$((ATTEMPT+1))
+              echo "❌ Failed to connect or IP didn't change. Retrying..."; ATTEMPT=$((ATTEMPT+1))
             fi
           done
+          if [ "$CONNECTED" = false ]; then exit 1; fi
 
-          if [ "$CONNECTED" = false ]; then
-            echo "CRITICAL ERROR: Could not establish VPN after $MAX_ATTEMPTS tries."
-            exit 1
-          fi
-
-      - name: Scope-Locked Recon
+      - name: Scoped Recon & Deep Spidering
         run: |
-          # Define scope based on program rules
+          # 1. Scope definition (Strictly as per Flowwow rules)
           echo "flowwow.com" > scope.txt
           echo "apis.flowwow.com" >> scope.txt
           echo "api2.flowwow.com" >> scope.txt
           echo "api-shop.flowwow.com" >> scope.txt
           echo "clientweb.flowwow.com" >> scope.txt
-          subfinder -dL scope.txt -silent > final_scope.txt
-          httpx -l final_scope.txt -silent -o live.txt
-
-      - name: "CRITICAL: Logic & IDOR Parameter Mining"
-        run: |
-          # Deep spidering for hidden endpoints
+          
+          # 2. Subdomain discovery & Live Probing
+          subfinder -dL scope.txt -silent | httpx -silent -o live.txt
+          
+          # 3. Deep JS & API Spidering (Finding the hidden paths)
           katana -list live.txt -jc -kf all -d 3 -o endpoints.txt
-          # Filter for high-value targets and find hidden params
-          grep -E "api|shop|client" endpoints.txt | head -n 20 > high_priority.txt
-          while read -r url; do
-            arjun -u "$url" --rate-limit 2 -oJ "params_$(date +%s).json"
-          done < high_priority.txt
 
-      - name: "CRITICAL: Vulnerability Scanning"
+      - name: "ELITE: Sensitive Keyword Mining"
         run: |
-          # Scans for SSRF, RCE, and Critical CVEs
-          nuclei -l endpoints.txt -t vulnerabilities/ssrf/ -t cves/ -severity critical,high -rate-limit 5 -o nuclei_results.txt
+          # Filter for endpoints that usually contain High/Critical bugs (IDOR, Admin Bypasses)
+          grep -Ei "admin|debug|config|setup|api/v1|api/v2|internal|private|auth|user|env|backup|sql|db" endpoints.txt > elite_targets.txt
+          echo "High-Value Targets Found: $(wc -l < elite_targets.txt)"
 
-      - name: Archive Elite Evidence
+      - name: "CRITICAL: High-Severity Vulnerability Scan"
+        run: |
+          # Scanning for SSRF, RCE, and Sensitive Data Exposure
+          # If you have an OOB_SERVER secret, Nuclei will use it for SSRF detection
+          nuclei -l elite_targets.txt -t vulnerabilities/ssrf/ -t cves/ -t exposures/ -severity critical,high -rate-limit 5 -o nuclei_results.txt
+
+      - name: "HIGH: Parameter Mining for IDORs"
+        run: |
+          # Focus on the top 15 most sensitive endpoints for parameter fuzzing
+          head -n 15 elite_targets.txt | while read -r url; do
+            echo "Mining parameters for: $url"
+            arjun -u "$url" --rate-limit 2 -oJ "params_$(date +%s).json"
+          done
+
+      - name: Archive All Bounty Evidence
         uses: actions/upload-artifact@v4
         with:
-          name: flowwow-max-results
+          name: flowwow-elite-results
           path: |
             nuclei_results.txt
+            elite_targets.txt
             endpoints.txt
             params_*.json
+            vpn.log
             
