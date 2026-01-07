@@ -1,108 +1,61 @@
-name: Flowwow-Complete
+name: OpenAI-Infrastructure-Logic-Hunt
 on:
   workflow_dispatch:
-    inputs:
-      target:
-        description: 'Target (default: flowwow.com)'
-        required: true
-        default: 'flowwow.com'
 
 jobs:
   exploit-hunt:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Install Maximum Arsenal
+      - name: Install Arsenal
         run: |
-          sudo apt-get update && sudo apt-get install -y openvpn python3-requests curl grep
-          # Recon & Probing
           go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
           go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
-          # Vulnerability & Logic Tools
-          go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
           go install -v github.com/projectdiscovery/katana/cmd/katana@latest
+          go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
           go install -v github.com/lc/gau/v2/cmd/gau@latest
           pip install arjun
           sudo mv ~/go/bin/* /usr/local/bin/
 
-      - name: Relentless VPN Connection Loop
-        shell: bash
+      - name: Recon: Massive Surface & History
         run: |
-          INITIAL_IP=$(curl -s --max-time 10 https://ifconfig.me || echo "0.0.0.0")
-          CONNECTED=false
-          ATTEMPT=1
-          while [ "$CONNECTED" = false ] && [ $ATTEMPT -le 15 ]; do
-            echo "VPN Attempt #$ATTEMPT..."
-            python3 -c "
-          import requests, base64, random
-          try:
-              r = requests.get('https://www.vpngate.net/api/iphone/', timeout=15)
-              servers = [line for line in r.text.split('\n') if not line.startswith('*') and len(line) > 10]
-              random.shuffle(servers)
-              data = servers[0].split(',')
-              b64_str = data[-1].strip()
-              missing_padding = len(b64_str) % 4
-              if missing_padding: b64_str += '=' * (4 - missing_padding)
-              with open('auto.ovpn', 'wb') as f: f.write(base64.b64decode(b64_str))
-          except: exit(1)
-          "
-            sudo killall openvpn 2>/dev/null || true
-            sudo openvpn --config auto.ovpn --daemon --log vpn.log
-            sleep 30
-            CURRENT_IP=$(curl -s --max-time 10 https://ifconfig.me || echo "FAILED")
-            if [ "$CURRENT_IP" != "FAILED" ] && [ "$CURRENT_IP" != "$INITIAL_IP" ]; then
-              echo "✅ VPN Connected! IP: $CURRENT_IP"; CONNECTED=true
-            else
-              echo "❌ Failed to connect or IP didn't change. Retrying..."; ATTEMPT=$((ATTEMPT+1))
-            fi
-          done
-          if [ "$CONNECTED" = false ]; then exit 1; fi
-
-      - name: Scoped Recon & Deep Spidering
-        run: |
-          # 1. Scope definition (Strictly as per Flowwow rules)
-          echo "flowwow.com" > scope.txt
-          echo "apis.flowwow.com" >> scope.txt
-          echo "api2.flowwow.com" >> scope.txt
-          echo "api-shop.flowwow.com" >> scope.txt
-          echo "clientweb.flowwow.com" >> scope.txt
+          echo "openai.com" > scope.txt
+          echo "api.openai.com" >> scope.txt
           
-          # 2. Subdomain discovery & Live Probing
-          subfinder -dL scope.txt -silent | httpx -silent -o live.txt
+          # 1. Passive discovery of every URL ever seen (Historical Mining)
+          cat scope.txt | gau --subs --threads 2 > historical_urls.txt
           
-          # 3. Deep JS & API Spidering (Finding the hidden paths)
-          katana -list live.txt -jc -kf all -d 3 -o endpoints.txt
+          # 2. Live subdomain discovery
+          subfinder -dL scope.txt -silent -o subdomains.txt
+          httpx -l subdomains.txt -silent -o live_targets.txt
 
-      - name: "ELITE: Sensitive Keyword Mining"
+      - name: The Mining Step: API Logic & Codenames
         run: |
-          # Filter for endpoints that usually contain High/Critical bugs (IDOR, Admin Bypasses)
-          grep -Ei "admin|debug|config|setup|api/v1|api/v2|internal|private|auth|user|env|backup|sql|db" endpoints.txt > elite_targets.txt
-          echo "High-Value Targets Found: $(wc -l < elite_targets.txt)"
+          # 1. Deep spidering focusing on APIs and JS bundles
+          katana -list live_targets.txt -jc -kf all -d 4 -ratelimit 2 -o all_endpoints.txt
+          
+          # 2. Extract targets likely to have BOLA/IDOR (UUIDs, IDs in paths)
+          grep -E "/v[0-9]/|[a-f0-9]{8}-" all_endpoints.txt > potential_idor_targets.txt
+          
+          # 3. Search for Unreleased Product Names (Explicit Bounty Category)
+          grep -Ei "codename|arrakis|gobi|internal-only|beta-feature" all_endpoints.txt > unreleased_intel.txt
 
-      - name: "CRITICAL: High-Severity Vulnerability Scan"
+      - name: Automated Vulnerability & Leak Check
         run: |
-          # Scanning for SSRF, RCE, and Sensitive Data Exposure
-          # If you have an OOB_SERVER secret, Nuclei will use it for SSRF detection
-          nuclei -l elite_targets.txt -t vulnerabilities/ssrf/ -t cves/ -t exposures/ -severity critical,high -rate-limit 5 -o nuclei_results.txt
-
-      - name: "HIGH: Parameter Mining for IDORs"
-        run: |
-          # Focus on the top 15 most sensitive endpoints for parameter fuzzing
-          head -n 15 elite_targets.txt | while read -r url; do
-            echo "Mining parameters for: $url"
-            arjun -u "$url" --rate-limit 2 -oJ "params_$(date +%s).json"
+          # Focus Nuclei on EXPOSURES (keys, configs, azure blobs)
+          nuclei -l all_endpoints.txt -t exposures/ -t vulnerabilities/ -severity critical,high -rate-limit 2 -o nuclei_results.txt
+          
+          # Parameter Fuzzing on top API endpoints to find hidden 'debug' or 'admin' flags
+          head -n 10 potential_idor_targets.txt | while read -r url; do
+            arjun -u "$url" --rate-limit 1 -oJ "params_$(date +%s).json"
           done
 
-      - name: Archive All Bounty Evidence
+      - name: Upload Bounty Gold
         uses: actions/upload-artifact@v4
         with:
-          name: flowwow-elite-results
+          name: openai-gold-mine
           path: |
             nuclei_results.txt
-            elite_targets.txt
-            endpoints.txt
+            unreleased_intel.txt
+            potential_idor_targets.txt
             params_*.json
-            vpn.log
             
