@@ -1,4 +1,4 @@
-name: OpenAI-Infrastructure-Logic-Hunt
+name: OpenAI-Infrastructure-Full-Goldmine
 on:
   workflow_dispatch:
 
@@ -16,46 +16,45 @@ jobs:
           pip install arjun
           sudo mv ~/go/bin/* /usr/local/bin/
 
-      - name: Recon: Massive Surface & History
+      - name: Recon:Target Identification
         run: |
+          # 1. Scope based on OpenAI's 'Gold' targets
           echo "openai.com" > scope.txt
           echo "api.openai.com" >> scope.txt
+          echo "openai.org" >> scope.txt
           
-          # 1. Passive discovery of every URL ever seen (Historical Mining)
-          cat scope.txt | gau --subs --threads 2 > historical_urls.txt
-          
-          # 2. Live subdomain discovery
+          # 2. Find every possible subdomain and live host
           subfinder -dL scope.txt -silent -o subdomains.txt
           httpx -l subdomains.txt -silent -o live_targets.txt
 
-      - name: The Mining Step: API Logic & Codenames
+      - name: Deep Mining:API & Web Logic
         run: |
-          # 1. Deep spidering focusing on APIs and JS bundles
+          # 3. Use Katana for Deep Spidering (JS bundles and API paths)
           katana -list live_targets.txt -jc -kf all -d 4 -ratelimit 2 -o all_endpoints.txt
           
-          # 2. Extract targets likely to have BOLA/IDOR (UUIDs, IDs in paths)
-          grep -E "/v[0-9]/|[a-f0-9]{8}-" all_endpoints.txt > potential_idor_targets.txt
+          # 4. Extract 'Gold' targets (BOLA/IDOR prone paths)
+          grep -E "/v[0-9]/|admin|billing|org-|uuid|checkout" all_endpoints.txt > priority_targets.txt
           
-          # 3. Search for Unreleased Product Names (Explicit Bounty Category)
-          grep -Ei "codename|arrakis|gobi|internal-only|beta-feature" all_endpoints.txt > unreleased_intel.txt
+          # 5. Search for unreleased codenames in JS (The 'Quick' Bounty)
+          grep -Ei "arrakis|gobi|tiara|internal-api|preview-feature" all_endpoints.txt > unreleased_intel.txt
 
-      - name: Automated Vulnerability & Leak Check
+      - name: "CRITICAL: Automated Vulnerability Fetcher"
         run: |
-          # Focus Nuclei on EXPOSURES (keys, configs, azure blobs)
-          nuclei -l all_endpoints.txt -t exposures/ -t vulnerabilities/ -severity critical,high -rate-limit 2 -o nuclei_results.txt
+          # 6. Nuclei: Focus on Exposures and Cloud Leaks (Azure Blobs/Keys)
+          nuclei -l priority_targets.txt -t exposures/ -t vulnerabilities/ -severity critical,high -rate-limit 2 -o nuclei_results.txt
           
-          # Parameter Fuzzing on top API endpoints to find hidden 'debug' or 'admin' flags
-          head -n 10 potential_idor_targets.txt | while read -r url; do
-            arjun -u "$url" --rate-limit 1 -oJ "params_$(date +%s).json"
+          # 7. Arjun: Fuzz for hidden 'admin' or 'debug' parameters on API endpoints
+          head -n 5 priority_targets.txt | while read -r url; do
+             arjun -u "$url" --rate-limit 1 -oJ "params_$(date +%s).json"
           done
 
-      - name: Upload Bounty Gold
+      - name: Archive All Evidence
         uses: actions/upload-artifact@v4
         with:
-          name: openai-gold-mine
+          name: openai-full-results
           path: |
             nuclei_results.txt
             unreleased_intel.txt
-            potential_idor_targets.txt
+            priority_targets.txt
             params_*.json
             
