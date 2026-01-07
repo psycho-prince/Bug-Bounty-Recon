@@ -6,9 +6,6 @@ jobs:
   exploit-hunt:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
       - name: Install Advanced Arsenal
         run: |
           go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
@@ -19,52 +16,40 @@ jobs:
           pip install arjun
           sudo mv ~/go/bin/* /usr/local/bin/
 
-      - name: Phase 1:Massive Recon & Historical Mining
+      - name: Phase 1: Targeted Unified Recon
         run: |
+          # ADDED: Targeting the specific 'unified' subdomains found in your logs
           echo "openai.com" > scope.txt
           echo "api.openai.com" >> scope.txt
-          echo "openai.org" >> scope.txt
+          echo "unified-79.api.openai.com" >> scope.txt
+          echo "unified-8.api.openai.com" >> scope.txt
           
-          # Find all historical URLs (finds old APIs like /v1/ that might still be live)
-          cat scope.txt | gau --subs --threads 2 > historical_urls.txt || true
-          
-          # Discover all live subdomains
           subfinder -dL scope.txt -silent -o subdomains.txt
           httpx -l subdomains.txt -silent -title -sc -o live_targets.txt
 
-      - name: Phase 2:Deep Logic Spidering (Fixed Rate-Limit)
+      - name: Phase 2: Deep Mining for BOLA & Internal Intel
         run: |
-          # Use Katana to crawl live sites and JS files for hidden endpoints
-          # -rl 10 (rate-limit) and -c 5 (concurrency) to stay under Cloudflare radar
+          # FIXED: -rl 10 is the correct flag for Katana rate-limiting
           katana -list live_targets.txt -jc -kf all -d 3 -rl 10 -c 5 -o all_endpoints.txt
           
-          # --- THE GOLD MINING LOGIC ---
+          # 1. BOLA/IDOR: Focus on the unified gateways and UUIDs from your logs
+          grep -E "unified|/v[0-9]/|org-|uuid|[a-f0-9]{8}-" all_endpoints.txt > potential_idor_targets.txt || true
           
-          # 1. BOLA/IDOR Targets: Extract paths with UUIDs or Org-IDs
-          grep -E "/v[0-9]/|org-|uuid|[a-f0-9]{8}-" all_endpoints.txt > potential_idor_targets.txt || true
+          # 2. Billing Logic: Targeting the payment session flows
+          grep -Ei "billing|checkout|payment|session|invoice" all_endpoints.txt > billing_logic_targets.txt || true
           
-          # 2. Billing/Admin Targets: High-value payment and subscription logic
-          grep -Ei "billing|checkout|subscribe|admin|invoice|payment" all_endpoints.txt > billing_logic_targets.txt || true
-          
-          # 3. Unreleased Features: Mining for internal project codenames
-          # Search for specific 2026 codenames and general internal terms
-          grep -Ei "arrakis|gobi|tiara|internal-api|preview|experimental|alpha" all_endpoints.txt > unreleased_intel.txt || true
+          # 3. Internal Intel: Searching for the GPT-5/Codex references found
+          grep -Ei "gpt-5|codex|arrakis|internal-api|preview" all_endpoints.txt > unreleased_intel.txt || true
 
-      - name: Phase 3:Automated Proof-of-Concept (PoC) Fetcher
+      - name: Phase 3: Automated Logic Testing
         run: |
-          # Scan priority targets for Azure/Cloud exposures and SSRF
+          # Scanning unified endpoints for misconfigurations
           nuclei -l potential_idor_targets.txt -t exposures/ -t vulnerabilities/ -severity critical,high -rl 5 -o nuclei_results.txt || true
           
-          # Arjun: Discover hidden parameters (like ?debug=true or ?admin=1)
-          # These hidden parameters are often the key to bypassing authorization
-          head -n 5 billing_logic_targets.txt | while read -r url; do
+          # Fuzzing for hidden parameters (e.g., ?admin=true) on the new subdomains
+          head -n 5 potential_idor_targets.txt | while read -r url; do
              arjun -u "$url" --rate-limit 2 -oJ "params_$(date +%s).json" || true
           done
-
-      - name: Phase 4:Corporate Leak Detection
-        run: |
-          # Check for sensitive OpenAI info exposed on openai.org or other subdomains
-          grep -Ei "password|secret|key|token|confidential" all_endpoints.txt > sensitive_leaks.txt || true
 
       - name: Archive All Evidence
         uses: actions/upload-artifact@v4
@@ -75,7 +60,5 @@ jobs:
             unreleased_intel.txt
             potential_idor_targets.txt
             billing_logic_targets.txt
-            sensitive_leaks.txt
             params_*.json
-            historical_urls.txt
             
