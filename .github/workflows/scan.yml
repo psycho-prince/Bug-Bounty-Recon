@@ -16,7 +16,7 @@ jobs:
           pip install arjun
           sudo mv ~/go/bin/* /usr/local/bin/
 
-      - name: Phase 1: Targeted Unified Recon
+      - name: Phase 1:Targeted Unified Recon
         run: |
           # ADDED: Targeting the specific 'unified' subdomains found in your logs
           echo "openai.com" > scope.txt
@@ -27,7 +27,7 @@ jobs:
           subfinder -dL scope.txt -silent -o subdomains.txt
           httpx -l subdomains.txt -silent -title -sc -o live_targets.txt
 
-      - name: Phase 2: Deep Mining for BOLA & Internal Intel
+      - name: Phase 2:Deep Mining for BOLA & Internal Intel
         run: |
           # FIXED: -rl 10 is the correct flag for Katana rate-limiting
           katana -list live_targets.txt -jc -kf all -d 3 -rl 10 -c 5 -o all_endpoints.txt
@@ -41,7 +41,7 @@ jobs:
           # 3. Internal Intel: Searching for the GPT-5/Codex references found
           grep -Ei "gpt-5|codex|arrakis|internal-api|preview" all_endpoints.txt > unreleased_intel.txt || true
 
-      - name: Phase 3: Automated Logic Testing
+      - name: Phase 3:Automated Logic Testing
         run: |
           # Scanning unified endpoints for misconfigurations
           nuclei -l potential_idor_targets.txt -t exposures/ -t vulnerabilities/ -severity critical,high -rl 5 -o nuclei_results.txt || true
