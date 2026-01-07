@@ -17,73 +17,87 @@ jobs:
       - name: Install Advanced Arsenal
         run: |
           sudo apt-get update && sudo apt-get install -y openvpn python3-requests curl
-          # Recon & Probing
           go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
           go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
-          # Vulnerability Engine
           go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
-          # Logic & Spidering
           go install -v github.com/projectdiscovery/katana/cmd/katana@latest
-          go install -v github.com/lc/gau/v2/cmd/gau@latest
           pip install arjun
           sudo mv ~/go/bin/* /usr/local/bin/
 
-      - name: Auto-VPN (Flowwow Identity)
+      - name: Relentless VPN Connection Loop
+        shell: bash
         run: |
-          python3 -c "
-          import requests, base64
-          r = requests.get('https://www.vpngate.net/api/iphone/')
-          for line in r.text.split('\n'):
-              if line.startswith('*') or len(line) < 10: continue
-              data = line.split(',')
-              if len(data) > 14:
-                  with open('auto.ovpn', 'w') as f: f.write(base64.b64decode(data[-1]).decode('utf-8'))
-                  break
+          INITIAL_IP=$(curl -s https://ifconfig.me)
+          echo "Initial IP: $INITIAL_IP"
+          CONNECTED=false
+          ATTEMPT=1
+          MAX_ATTEMPTS=10
+
+          while [ "$CONNECTED" = false ] && [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+            echo "VPN Connection Attempt #$ATTEMPT..."
+            
+            # 1. Fetch a fresh VPN config using the Padding-Fixed Python script
+            python3 -c "
+          import requests, base64, binascii, random
+          try:
+              r = requests.get('https://www.vpngate.net/api/iphone/', timeout=10)
+              servers = [line for line in r.text.split('\n') if not line.startswith('*') and len(line) > 10]
+              # Pick a random server from the top 15 for better luck
+              data = random.choice(servers[:15]).split(',')
+              b64_str = data[-1].strip()
+              missing_padding = len(b64_str) % 4
+              if missing_padding: b64_str += '=' * (4 - missing_padding)
+              with open('auto.ovpn', 'wb') as f: f.write(base64.b64decode(b64_str))
+          except Exception as e: exit(1)
           "
-          sudo openvpn --config auto.ovpn --daemon
-          sleep 20
-          curl -s https://ifconfig.me
+            
+            # 2. Try to connect in the background
+            sudo killall openvpn 2>/dev/null || true
+            sudo openvpn --config auto.ovpn --daemon
+            sleep 30  # Wait for handshake
+            
+            # 3. Verify IP change
+            CURRENT_IP=$(curl -s --max-time 10 https://ifconfig.me || echo "FAILED")
+            
+            if [ "$CURRENT_IP" != "FAILED" ] && [ "$CURRENT_IP" != "$INITIAL_IP" ]; then
+              echo "✅ VPN Connected Successfully! New IP: $CURRENT_IP"
+              CONNECTED=true
+            else
+              echo "❌ Attempt #$ATTEMPT failed. Retrying with different server..."
+              ATTEMPT=$((ATTEMPT+1))
+            fi
+          done
+
+          if [ "$CONNECTED" = false ]; then
+            echo "CRITICAL ERROR: Could not establish VPN after $MAX_ATTEMPTS tries."
+            exit 1
+          fi
 
       - name: Scope-Locked Recon
         run: |
-          # Only test the domains listed in the program scope
+          # Define scope based on program rules
           echo "flowwow.com" > scope.txt
           echo "apis.flowwow.com" >> scope.txt
           echo "api2.flowwow.com" >> scope.txt
           echo "api-shop.flowwow.com" >> scope.txt
           echo "clientweb.flowwow.com" >> scope.txt
-          subfinder -dL scope.txt -silent >> final_scope.txt
+          subfinder -dL scope.txt -silent > final_scope.txt
           httpx -l final_scope.txt -silent -o live.txt
 
       - name: "CRITICAL: Logic & IDOR Parameter Mining"
         run: |
-          # 1. Spider for deep API routes (especially for sellers/couriers)
-          katana -list live.txt -jc -kf all -d 4 -o endpoints.txt
-          
-          # 2. Find hidden parameters that lead to IDOR (e.g., user_id, order_id, store_id)
-          grep -E "api|shop|client" endpoints.txt | head -n 25 > high_priority.txt
+          # Deep spidering for hidden endpoints
+          katana -list live.txt -jc -kf all -d 3 -o endpoints.txt
+          # Filter for high-value targets and find hidden params
+          grep -E "api|shop|client" endpoints.txt | head -n 20 > high_priority.txt
           while read -r url; do
             arjun -u "$url" --rate-limit 2 -oJ "params_$(date +%s).json"
           done < high_priority.txt
 
-      - name: "HIGH: E-Commerce Logic Probing"
+      - name: "CRITICAL: Vulnerability Scanning"
         run: |
-          # Custom script to probe for price/quantity tampering
-          python3 -c "
-          import requests
-          targets = open('high_priority.txt').read().splitlines()
-          for t in targets:
-              # Simple logic test for negative quantity or price manipulation
-              # These are common high-payout bugs in flower shops
-              print(f'Probing Logic on: {t}')
-          "
-
-      - name: "CRITICAL: OOB SSRF & RCE Scan"
-        run: |
-          # Focus on Critical vulnerabilities that bypass WAF
-          # Replace OOB_SERVER if you have a private interactsh domain
-          nuclei -l endpoints.txt -t vulnerabilities/ssrf/ -t cves/ -t default-logins/ \
-                 -severity critical,high -rate-limit 5 -o nuclei_results.txt
+          # Scans for SSRF, RCE, and Critical CVEs
+          nuclei -l endpoints.txt -t vulnerabilities/ssrf/ -t cves/ -severity critical,high -rate-limit 5 -o nuclei_results.txt
 
       - name: Archive Elite Evidence
         uses: actions/upload-artifact@v4
