@@ -1,4 +1,4 @@
-name: OpenAI-Infrastructure-Full-Goldmine
+name: OpenAI-Complete-Goldmine-Hunter
 on:
   workflow_dispatch:
 
@@ -6,7 +6,10 @@ jobs:
   exploit-hunt:
     runs-on: ubuntu-latest
     steps:
-      - name: Install Arsenal
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Advanced Arsenal
         run: |
           go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
           go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
@@ -16,45 +19,63 @@ jobs:
           pip install arjun
           sudo mv ~/go/bin/* /usr/local/bin/
 
-      - name: Recon:Target Identification
+      - name: Phase 1:Massive Recon & Historical Mining
         run: |
-          # 1. Scope based on OpenAI's 'Gold' targets
           echo "openai.com" > scope.txt
           echo "api.openai.com" >> scope.txt
           echo "openai.org" >> scope.txt
           
-          # 2. Find every possible subdomain and live host
+          # Find all historical URLs (finds old APIs like /v1/ that might still be live)
+          cat scope.txt | gau --subs --threads 2 > historical_urls.txt || true
+          
+          # Discover all live subdomains
           subfinder -dL scope.txt -silent -o subdomains.txt
-          httpx -l subdomains.txt -silent -o live_targets.txt
+          httpx -l subdomains.txt -silent -title -sc -o live_targets.txt
 
-      - name: Deep Mining:API & Web Logic
+      - name: Phase 2:Deep Logic Spidering (Fixed Rate-Limit)
         run: |
-          # 3. Use Katana for Deep Spidering (JS bundles and API paths)
-          katana -list live_targets.txt -jc -kf all -d 4 -ratelimit 2 -o all_endpoints.txt
+          # Use Katana to crawl live sites and JS files for hidden endpoints
+          # -rl 10 (rate-limit) and -c 5 (concurrency) to stay under Cloudflare radar
+          katana -list live_targets.txt -jc -kf all -d 3 -rl 10 -c 5 -o all_endpoints.txt
           
-          # 4. Extract 'Gold' targets (BOLA/IDOR prone paths)
-          grep -E "/v[0-9]/|admin|billing|org-|uuid|checkout" all_endpoints.txt > priority_targets.txt
+          # --- THE GOLD MINING LOGIC ---
           
-          # 5. Search for unreleased codenames in JS (The 'Quick' Bounty)
-          grep -Ei "arrakis|gobi|tiara|internal-api|preview-feature" all_endpoints.txt > unreleased_intel.txt
+          # 1. BOLA/IDOR Targets: Extract paths with UUIDs or Org-IDs
+          grep -E "/v[0-9]/|org-|uuid|[a-f0-9]{8}-" all_endpoints.txt > potential_idor_targets.txt || true
+          
+          # 2. Billing/Admin Targets: High-value payment and subscription logic
+          grep -Ei "billing|checkout|subscribe|admin|invoice|payment" all_endpoints.txt > billing_logic_targets.txt || true
+          
+          # 3. Unreleased Features: Mining for internal project codenames
+          # Search for specific 2026 codenames and general internal terms
+          grep -Ei "arrakis|gobi|tiara|internal-api|preview|experimental|alpha" all_endpoints.txt > unreleased_intel.txt || true
 
-      - name: "CRITICAL: Automated Vulnerability Fetcher"
+      - name: Phase 3:Automated Proof-of-Concept (PoC) Fetcher
         run: |
-          # 6. Nuclei: Focus on Exposures and Cloud Leaks (Azure Blobs/Keys)
-          nuclei -l priority_targets.txt -t exposures/ -t vulnerabilities/ -severity critical,high -rate-limit 2 -o nuclei_results.txt
+          # Scan priority targets for Azure/Cloud exposures and SSRF
+          nuclei -l potential_idor_targets.txt -t exposures/ -t vulnerabilities/ -severity critical,high -rl 5 -o nuclei_results.txt || true
           
-          # 7. Arjun: Fuzz for hidden 'admin' or 'debug' parameters on API endpoints
-          head -n 5 priority_targets.txt | while read -r url; do
-             arjun -u "$url" --rate-limit 1 -oJ "params_$(date +%s).json"
+          # Arjun: Discover hidden parameters (like ?debug=true or ?admin=1)
+          # These hidden parameters are often the key to bypassing authorization
+          head -n 5 billing_logic_targets.txt | while read -r url; do
+             arjun -u "$url" --rate-limit 2 -oJ "params_$(date +%s).json" || true
           done
+
+      - name: Phase 4:Corporate Leak Detection
+        run: |
+          # Check for sensitive OpenAI info exposed on openai.org or other subdomains
+          grep -Ei "password|secret|key|token|confidential" all_endpoints.txt > sensitive_leaks.txt || true
 
       - name: Archive All Evidence
         uses: actions/upload-artifact@v4
         with:
-          name: openai-full-results
+          name: openai-complete-results
           path: |
             nuclei_results.txt
             unreleased_intel.txt
-            priority_targets.txt
+            potential_idor_targets.txt
+            billing_logic_targets.txt
+            sensitive_leaks.txt
             params_*.json
+            historical_urls.txt
             
