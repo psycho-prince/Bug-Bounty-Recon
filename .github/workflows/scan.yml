@@ -20,48 +20,52 @@ jobs:
     - name: Install System Dependencies
       run: |
         sudo apt update
-        # libpcap-dev is REQUIRED for naabu to compile/run
         sudo apt install -y jq parallel nmap dnsutils libpcap-dev build-essential
 
     - name: Install Full Arsenal
       run: |
-        # ProjectDiscovery Suite
         go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
         go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
         go install -v github.com/projectdiscovery/katana/cmd/katana@latest
         go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
         go install -v github.com/projectdiscovery/naabu/v2/cmd/naabu@latest
-        # Fuzzing & Recon Tools
         go install -v github.com/ffuf/ffuf/v2@latest
-        go install -v github.com/lc/gau/v2/cmd/gau@latest
         pip install arjun
         sudo mv ~/go/bin/* /usr/local/bin/
 
     # ---------------- RECON PHASE ----------------
 
-    - name: Asset Discovery (Subdomains & Port Scan)
+    - name: Asset Discovery
       run: |
         echo "${{ github.event.inputs.target_domain }}" > scope.txt
-        # Find all subdomains
         subfinder -dL scope.txt -all -silent -o subs.txt
-        # Port scan findings (sudo required for SYN scans; naabu uses -list)
         sudo naabu -list subs.txt -top-ports 1000 -silent -o ports.txt
-        # Resolve live web services (httpx uses -list or -l)
+        # Using -o live.txt for the dirty log, but we will clean it next
         httpx -list ports.txt -sc -cl -title -td -silent -o live.txt
 
-    - name: Surface Mapping (Katana & Arjun)
+    - name: Surface Mapping (Cleaned)
       run: |
-        # FIX: Katana uses -list instead of -l
+        # 1. Katana deep crawl
         katana -list live.txt -jc -kf all -d 3 -rl 20 -o endpoints.txt
-        # Arjun uses -i for multiple targets
-        arjun -i live.txt -oT params.txt
+
+        # 2. CRITICAL FIX: Strip EVERYTHING except the URL for Arjun
+        # This removes [200], [Cloudflare], and weird brackets that cause IPv6 errors
+        grep -oP 'https?://[^\s\[\]]+' live.txt | sort -u > arjun_targets.txt
+        
+        # 3. Run Arjun (with stability flags and non-blocking error handling)
+        if [ -s arjun_targets.txt ]; then
+          arjun -i arjun_targets.txt --stable -t 10 -oT params.txt || echo "Arjun encountered some errors but continuing..."
+        else
+          echo "No targets found for Arjun." > params.txt
+        fi
 
     # ---------------- EXPLOITATION PHASE ----------------
 
     - name: Deep 403/404 Bypass Sweep
       run: |
-        # Testing discovered endpoints with custom bypass headers
-        httpx -list endpoints.txt -path "//" \
+        # Ensure we only pass URLs to httpx bypass
+        grep -oP 'https?://[^\s\[\]]+' endpoints.txt | sort -u > clean_endpoints.txt
+        httpx -list clean_endpoints.txt -path "//" \
           -H "X-OpenAI-Internal: true" \
           -H "X-Forwarded-For: 127.0.0.1" \
           -H "X-Original-URL: /" \
@@ -69,30 +73,23 @@ jobs:
 
     - name: High-CVE Vulnerability Sweep
       run: |
-        # Nuclei uses -list for file input
-        nuclei -list live.txt -severity critical,high,medium \
+        # Clean targets for Nuclei
+        grep -oP 'https?://[^\s\[\]]+' live.txt | sort -u > nuclei_targets.txt
+        nuclei -list nuclei_targets.txt -severity critical,high,medium \
           -tags cve,rce,auth-bypass,exposure,takeover \
           -rl 50 -o nuclei_findings.txt
 
     # ---------------- REPORTING PHASE ----------------
 
-    - name: Intelligence & Correlation
+    - name: Package & Upload Evidence
       run: |
         mkdir -p results
-        mv *.txt results/ || true
-        mv *.json results/ || true
-        
-        # Build Summary Report
-        echo "# Security Assessment Report" > results/REPORT.md
-        echo "## Summary Stats" >> results/REPORT.md
-        [[ -f results/subs.txt ]] && echo "- Assets Found: $(wc -l < results/subs.txt)" >> results/REPORT.md
-        [[ -f results/live.txt ]] && echo "- Live Services: $(wc -l < results/live.txt)" >> results/REPORT.md
-        echo "" >> results/REPORT.md
-        echo "## High Value Hits (200 OK on Bypasses)" >> results/REPORT.md
-        grep "200" results/bypass_findings.txt >> results/REPORT.md || echo "No direct bypasses found yet." >> results/REPORT.md
-
-    - name: Package Evidence
-      run: |
+        cp *.txt results/ || true
+        cp *.json results/ || true
+        # Build a quick summary so you don't have to download the zip to see hits
+        echo "# BUG HUNT SUMMARY" > results/SUMMARY.md
+        echo "## 🎯 Bypasses Found (200 OK)" >> results/SUMMARY.md
+        grep "200" results/bypass_findings.txt >> results/SUMMARY.md || echo "None" >> results/SUMMARY.md
         tar -czf security-results.tar.gz results
 
     - name: Upload Results
