@@ -1,0 +1,40 @@
+name: OpenAI-Security-Engine
+
+on:
+  workflow_dispatch: # Manual trigger
+  schedule:
+    - cron: '0 0 * * *' # Auto-run daily to check for changes
+
+jobs:
+  vulnerability-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
+      - name: Install Tools
+        run: |
+          go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+          pip install arjun
+          sudo mv ~/go/bin/nuclei /usr/local/bin/
+
+      # TEST 1: Focused Nuclei Scan on your verified targets
+      - name: Run Nuclei
+        run: |
+          nuclei -list recon/nuclei_targets.txt -severity critical,high -rl 50 -o nuclei_findings.txt || true
+
+      # TEST 2: Parameter discovery on high-value apps (like the Flask backend)
+      - name: Run Arjun
+        run: |
+          # We take the top 20 high-value targets from your list to stay within time
+          head -n 20 recon/arjun_targets.txt > active_arjun.txt
+          arjun -i active_arjun.txt --stable -t 10 -oT arjun_results.txt || true
+
+      - name: Upload New Evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-results
+          path: |
+            nuclei_findings.txt
+            arjun_results.txt
