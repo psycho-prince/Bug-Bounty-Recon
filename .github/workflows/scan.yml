@@ -11,72 +11,96 @@ on:
 jobs:
   security-intel:
     runs-on: ubuntu-latest
-    timeout-minutes: 180 # Increased for deep crawling
+    timeout-minutes: 180
 
     steps:
     - name: Checkout
       uses: actions/checkout@v4
 
+    - name: Install System Dependencies
+      run: |
+        sudo apt update
+        # libpcap-dev is REQUIRED for naabu to compile/run
+        sudo apt install -y jq parallel nmap dnsutils libpcap-dev build-essential
+
     - name: Install Full Arsenal
       run: |
-        sudo apt update && sudo apt install -y jq parallel nmap dnsutils
         # ProjectDiscovery Suite
         go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
         go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
         go install -v github.com/projectdiscovery/katana/cmd/katana@latest
         go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
         go install -v github.com/projectdiscovery/naabu/v2/cmd/naabu@latest
-        # Fuzzing tools
+        # Fuzzing & Recon Tools
         go install -v github.com/ffuf/ffuf/v2@latest
+        go install -v github.com/lc/gau/v2/cmd/gau@latest
         pip install arjun
         sudo mv ~/go/bin/* /usr/local/bin/
 
-    # ---------------- RECON ----------------
+    # ---------------- RECON PHASE ----------------
 
     - name: Asset Discovery (Subdomains & Port Scan)
       run: |
         echo "${{ github.event.inputs.target_domain }}" > scope.txt
         # Find all subdomains
         subfinder -dL scope.txt -all -silent -o subs.txt
-        # Port scan the findings to find hidden dev/admin panels
-        naabu -l subs.txt -top-ports 100 -silent -o ports.txt
-        # Check for live web services
+        # Port scan findings (sudo required for SYN scans on GitHub runners)
+        sudo naabu -l subs.txt -top-ports 1000 -silent -o ports.txt
+        # Resolve live web services with technology detection
         httpx -l ports.txt -sc -cl -title -td -silent -o live.txt
 
-    - name: Surface Mapping (Katana Crawling)
+    - name: Surface Mapping (Katana & Arjun)
       run: |
-        # Crawl for hidden API endpoints and JS files
-        katana -l live.txt -jc -kf -d 3 -silent -o endpoints.txt
+        # Deep crawl for hidden API endpoints and JS files
+        katana -l live.txt -jc -kf all -d 3 -rl 20 -o endpoints.txt
+        # Parameter discovery on the live web surface
+        arjun -i live.txt -oT params.txt
 
-    # ---------------- EXPLOITATION ----------------
+    # ---------------- EXPLOITATION PHASE ----------------
 
     - name: Deep 403/404 Bypass Sweep
       run: |
-        # Targeting the endpoints Katana found with our bypass headers
-        # We look for anomalies in Content-Length
+        # Targeting everything Katana found with our custom bypass headers
+        # Includes Path Normalization (//) and Internal Headers
         httpx -l endpoints.txt -path "//" \
           -H "X-OpenAI-Internal: true" \
           -H "X-Forwarded-For: 127.0.0.1" \
+          -H "X-Original-URL: /" \
           -sc -cl -title -o bypass_findings.txt
 
-    - name: Full Vulnerability Sweep (Nuclei)
+    - name: High-CVE Vulnerability Sweep
       run: |
-        # Scanning for known CVEs, BOLA, and SSRF
-        nuclei -l live.txt -severity critical,high,medium -o nuclei_findings.txt
+        # Targeting Critical/High CVEs, RCE, and Auth Bypasses
+        nuclei -l live.txt -severity critical,high,medium \
+          -tags cve,rce,auth-bypass,exposure,takeover \
+          -rl 50 -o nuclei_findings.txt
 
-    # ---------------- REPORTING ----------------
+    # ---------------- REPORTING PHASE ----------------
 
-    - name: Build Bug Report
+    - name: Intelligence & Correlation
       run: |
         mkdir -p results
-        cp *.txt results/ || true
-        # Create a summary of potential high-value hits
-        grep "200" results/bypass_findings.txt > results/POSSIBLE_BUGS.md || echo "No direct bypass yet" > results/POSSIBLE_BUGS.md
+        # Collect all discovery logs
+        mv *.txt results/ || true
+        mv *.json results/ || true
+        
+        # Build Summary
+        echo "# Security Assessment Report" > results/REPORT.md
+        echo "## Summary Stats" >> results/REPORT.md
+        echo "- Assets Found: $(wc -l < results/subs.txt)" >> results/REPORT.md
+        echo "- Live Services: $(wc -l < results/live.txt)" >> results/REPORT.md
+        echo "" >> results/REPORT.md
+        echo "## High Value Hits (200 OK on Bypasses)" >> results/REPORT.md
+        grep "200" results/bypass_findings.txt >> results/REPORT.md || echo "No direct bypasses found yet." >> results/REPORT.md
+
+    - name: Package Evidence
+      run: |
         tar -czf security-results.tar.gz results
 
-    - name: Upload Evidence
+    - name: Upload Results
       uses: actions/upload-artifact@v4
       with:
         name: full-recon-pack
         path: security-results.tar.gz
+        retention-days: 5
         
