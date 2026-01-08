@@ -11,7 +11,7 @@ on:
 jobs:
   security-intel:
     runs-on: ubuntu-latest
-    timeout-minutes: 360 # 6 Hours
+    timeout-minutes: 360 
 
     steps:
     - name: Checkout
@@ -32,30 +32,30 @@ jobs:
         pip install arjun
         sudo mv ~/go/bin/* /usr/local/bin/
 
-    # ---------------- PHASE 1: RAPID RECON ----------------
+    # ---------------- PHASE 1: RECON & CLOUDFLARE FILTER ----------------
 
-    - name: Asset Discovery
+    - name: Asset Discovery & Smart Filter
       run: |
         echo "${{ github.event.inputs.target_domain }}" > scope.txt
         subfinder -dL scope.txt -all -silent -o subs.txt
-        # Only Web Ports to save massive amounts of time
-        sudo naabu -list subs.txt -p 80,443,8080,8443 -silent -rate 1000 -o ports.txt
-        httpx -list ports.txt -sc -cl -td -silent -o live.txt
-        # EMERGENCY BACKUP: Save recon data immediately
-        mkdir -p results && cp live.txt results/live_backup.txt
-
-    # ---------------- PHASE 2: LIGHTWEIGHT MAPPING ----------------
-
-    - name: Surface Mapping
-      run: |
-        # Katana: NO-JS-PARSING (-njs) and Scoped Depth to stay under time
-        # -ct 600 limits each target to 10 minutes max
-        katana -list live.txt -njs -d 2 -ct 600 -rl 30 -o endpoints.txt || true
-
-        # Clean URLs for Arjun
-        grep -oP 'https?://[^\s\[\]]+' live.txt | sort -u | head -n 20 > arjun_targets.txt
         
-        # Arjun: Only test the first 20 targets to ensure completion
+        # Naabu: Top ports only to save time
+        sudo naabu -list subs.txt -top-ports 100 -silent -rate 1000 -o ports.txt
+        
+        # HTTPX: Detect Cloudflare and filter them out to avoid WAF blocks
+        # We save 'live.txt' but create 'targets_no_waf.txt' for aggressive testing
+        httpx -list ports.txt -sc -cl -td -silent -o live.txt
+        grep -vE "Cloudflare|Cloudfront|Akamai" live.txt | grep -oP 'https?://[^\s\[\]]+' > targets_no_waf.txt
+
+    # ---------------- PHASE 2: SURFACE MAPPING ----------------
+
+    - name: Surface Mapping (Optimized)
+      run: |
+        # Katana: No-JS parsing and 10-minute per-host limit to prevent hangs
+        katana -list targets_no_waf.txt -njs -d 2 -ct 600 -rl 50 -o endpoints.txt || true
+
+        # Arjun: Only test the top targets to prevent timeout
+        grep -oP 'https?://[^\s\[\]]+' targets_no_waf.txt | head -n 30 > arjun_targets.txt
         if [ -s arjun_targets.txt ]; then
           arjun -i arjun_targets.txt --stable -t 10 -oT params.txt || echo "Arjun skipped"
         fi
@@ -70,16 +70,18 @@ jobs:
           -H "X-Forwarded-For: 127.0.0.1" \
           -sc -cl -o bypass_findings.txt || true
 
-    - name: Nuclei Vulnerability Sweep
+    - name: Nuclei Vulnerability Sweep (Smart Mode)
       run: |
-        grep -oP 'https?://[^\s\[\]]+' live.txt | sort -u > nuclei_targets.txt
-        # ONLY Critical/High templates to save time
-        nuclei -list nuclei_targets.txt -severity critical,high -o nuclei_findings.txt || true
+        # Use targets_no_waf to avoid wasting time on blocked requests
+        # -nt = New Templates (Last 30 days)
+        # -tags = Focused on high-value leaks
+        nuclei -list targets_no_waf.txt -nt -severity critical,high -rl 50 -bs 10 -o nuclei_findings.txt || true
+        nuclei -list targets_no_waf.txt -tags exposure,config,token -severity critical,high -rl 50 -o nuclei_leaks.txt || true
 
     # ---------------- PHASE 4: ALWAYS UPLOAD ----------------
 
     - name: Package & Upload Evidence
-      if: always() # CRITICAL: Captures data even on timeout
+      if: always() 
       run: |
         mkdir -p results
         mv *.txt results/ || true
@@ -90,7 +92,7 @@ jobs:
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: bug-hunt-results
+        name: final-bug-results
         path: security-results.tar.gz
         retention-days: 5
         
