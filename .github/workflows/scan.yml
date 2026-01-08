@@ -11,7 +11,7 @@ on:
 jobs:
   security-intel:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 360 # 6 Hours
 
     steps:
     - name: Checkout
@@ -29,73 +29,68 @@ jobs:
         go install -v github.com/projectdiscovery/katana/cmd/katana@latest
         go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
         go install -v github.com/projectdiscovery/naabu/v2/cmd/naabu@latest
-        go install -v github.com/ffuf/ffuf/v2@latest
         pip install arjun
         sudo mv ~/go/bin/* /usr/local/bin/
 
-    # ---------------- RECON PHASE ----------------
+    # ---------------- PHASE 1: RAPID RECON ----------------
 
     - name: Asset Discovery
       run: |
         echo "${{ github.event.inputs.target_domain }}" > scope.txt
         subfinder -dL scope.txt -all -silent -o subs.txt
-        sudo naabu -list subs.txt -top-ports 1000 -silent -o ports.txt
-        # Using -o live.txt for the dirty log, but we will clean it next
-        httpx -list ports.txt -sc -cl -title -td -silent -o live.txt
+        # Only Web Ports to save massive amounts of time
+        sudo naabu -list subs.txt -p 80,443,8080,8443 -silent -rate 1000 -o ports.txt
+        httpx -list ports.txt -sc -cl -td -silent -o live.txt
+        # EMERGENCY BACKUP: Save recon data immediately
+        mkdir -p results && cp live.txt results/live_backup.txt
 
-    - name: Surface Mapping (Cleaned)
+    # ---------------- PHASE 2: LIGHTWEIGHT MAPPING ----------------
+
+    - name: Surface Mapping
       run: |
-        # 1. Katana deep crawl
-        katana -list live.txt -jc -kf all -d 3 -rl 20 -o endpoints.txt
+        # Katana: NO-JS-PARSING (-njs) and Scoped Depth to stay under time
+        # -ct 600 limits each target to 10 minutes max
+        katana -list live.txt -njs -d 2 -ct 600 -rl 30 -o endpoints.txt || true
 
-        # 2. CRITICAL FIX: Strip EVERYTHING except the URL for Arjun
-        # This removes [200], [Cloudflare], and weird brackets that cause IPv6 errors
-        grep -oP 'https?://[^\s\[\]]+' live.txt | sort -u > arjun_targets.txt
+        # Clean URLs for Arjun
+        grep -oP 'https?://[^\s\[\]]+' live.txt | sort -u | head -n 20 > arjun_targets.txt
         
-        # 3. Run Arjun (with stability flags and non-blocking error handling)
+        # Arjun: Only test the first 20 targets to ensure completion
         if [ -s arjun_targets.txt ]; then
-          arjun -i arjun_targets.txt --stable -t 10 -oT params.txt || echo "Arjun encountered some errors but continuing..."
-        else
-          echo "No targets found for Arjun." > params.txt
+          arjun -i arjun_targets.txt --stable -t 10 -oT params.txt || echo "Arjun skipped"
         fi
 
-    # ---------------- EXPLOITATION PHASE ----------------
+    # ---------------- PHASE 3: FOCUSED ATTACK ----------------
 
     - name: Deep 403/404 Bypass Sweep
       run: |
-        # Ensure we only pass URLs to httpx bypass
         grep -oP 'https?://[^\s\[\]]+' endpoints.txt | sort -u > clean_endpoints.txt
         httpx -list clean_endpoints.txt -path "//" \
           -H "X-OpenAI-Internal: true" \
           -H "X-Forwarded-For: 127.0.0.1" \
-          -H "X-Original-URL: /" \
-          -sc -cl -title -o bypass_findings.txt
+          -sc -cl -o bypass_findings.txt || true
 
-    - name: High-CVE Vulnerability Sweep
+    - name: Nuclei Vulnerability Sweep
       run: |
-        # Clean targets for Nuclei
         grep -oP 'https?://[^\s\[\]]+' live.txt | sort -u > nuclei_targets.txt
-        nuclei -list nuclei_targets.txt -severity critical,high,medium \
-          -tags cve,rce,auth-bypass,exposure,takeover \
-          -rl 50 -o nuclei_findings.txt
+        # ONLY Critical/High templates to save time
+        nuclei -list nuclei_targets.txt -severity critical,high -o nuclei_findings.txt || true
 
-    # ---------------- REPORTING PHASE ----------------
+    # ---------------- PHASE 4: ALWAYS UPLOAD ----------------
 
     - name: Package & Upload Evidence
+      if: always() # CRITICAL: Captures data even on timeout
       run: |
         mkdir -p results
-        cp *.txt results/ || true
-        cp *.json results/ || true
-        # Build a quick summary so you don't have to download the zip to see hits
-        echo "# BUG HUNT SUMMARY" > results/SUMMARY.md
-        echo "## 🎯 Bypasses Found (200 OK)" >> results/SUMMARY.md
-        grep "200" results/bypass_findings.txt >> results/SUMMARY.md || echo "None" >> results/SUMMARY.md
+        mv *.txt results/ || true
+        mv *.json results/ || true
         tar -czf security-results.tar.gz results
 
     - name: Upload Results
+      if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: max-coverage-results
+        name: bug-hunt-results
         path: security-results.tar.gz
         retention-days: 5
         
