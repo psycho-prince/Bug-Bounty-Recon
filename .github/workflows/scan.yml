@@ -1,98 +1,63 @@
-name: OpenAI-Max-Coverage-Security-Engine
-
+name: Security-Testing-Phase
 on:
   workflow_dispatch:
-    inputs:
-      target_domain:
-        description: 'Domain to hunt (e.g., openai.com)'
-        required: true
-        default: 'openai.com'
 
 jobs:
-  security-intel:
+  testing-and-exploitation:
     runs-on: ubuntu-latest
-    timeout-minutes: 360 
-
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+      - name: Checkout Recon Data
+        uses: actions/checkout@v4
 
-    - name: Install System Dependencies
-      run: |
-        sudo apt update
-        sudo apt install -y jq parallel nmap dnsutils libpcap-dev build-essential
+      - name: Install Toolset
+        run: |
+          go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+          pip install arjun
+          sudo mv ~/go/bin/nuclei /usr/local/bin/
 
-    - name: Install Full Arsenal
-      run: |
-        go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
-        go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
-        go install -v github.com/projectdiscovery/katana/cmd/katana@latest
-        go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
-        go install -v github.com/projectdiscovery/naabu/v2/cmd/naabu@latest
-        pip install arjun
-        sudo mv ~/go/bin/* /usr/local/bin/
+      - name: 1. Nuclei Scan
+        id: nuclei
+        # continue-on-error ensures the workflow doesn't stop if Nuclei fails
+        continue-on-error: true 
+        run: |
+          nuclei -list recon/nuclei_targets.txt -severity critical,high,medium -jsonl -o nuclei_results.json -rl 50
 
-    # ---------------- PHASE 1: RECON & CLOUDFLARE FILTER ----------------
+      - name: 2. Arjun Parameter Discovery
+        id: arjun
+        continue-on-error: true
+        run: |
+          head -n 25 recon/arjun_targets.txt > active_targets.txt
+          arjun -i active_targets.txt -oJ arjun_results.json --stable
 
-    - name: Asset Discovery & Smart Filter
-      run: |
-        echo "${{ github.event.inputs.target_domain }}" > scope.txt
-        subfinder -dL scope.txt -all -silent -o subs.txt
-        
-        # Naabu: Top ports only to save time
-        sudo naabu -list subs.txt -top-ports 100 -silent -rate 1000 -o ports.txt
-        
-        # HTTPX: Detect Cloudflare and filter them out to avoid WAF blocks
-        # We save 'live.txt' but create 'targets_no_waf.txt' for aggressive testing
-        httpx -list ports.txt -sc -cl -td -silent -o live.txt
-        grep -vE "Cloudflare|Cloudfront|Akamai" live.txt | grep -oP 'https?://[^\s\[\]]+' > targets_no_waf.txt
+      - name: 3. Create Report (Runs even on failure)
+        # if: always() ensures this runs even if the previous steps crashed
+        if: always() 
+        run: |
+          echo "{" > n8n_report.json
+          echo "  \"timestamp\": \"$(date)\"," >> n8n_report.json
+          echo "  \"nuclei_findings\": $(cat nuclei_results.json | jq -s '.' || echo "[]")," >> n8n_report.json
+          echo "  \"arjun_params\": $(cat arjun_results.json || echo "[]")" >> n8n_report.json
+          echo "}" >> n8n_report.json
 
-    # ---------------- PHASE 2: SURFACE MAPPING ----------------
+      - name: 4. Save Results to Repo (Crash-Proof)
+        if: always()
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          # Only add files that actually exist to avoid new errors
+          git add n8n_report.json nuclei_results.json arjun_results.json || true
+          git commit -m "Results (including partial data on failure)" || exit 0
+          git push
 
-    - name: Surface Mapping (Optimized)
-      run: |
-        # Katana: No-JS parsing and 10-minute per-host limit to prevent hangs
-        katana -list targets_no_waf.txt -njs -d 2 -ct 600 -rl 50 -o endpoints.txt || true
-
-        # Arjun: Only test the top targets to prevent timeout
-        grep -oP 'https?://[^\s\[\]]+' targets_no_waf.txt | head -n 30 > arjun_targets.txt
-        if [ -s arjun_targets.txt ]; then
-          arjun -i arjun_targets.txt --stable -t 10 -oT params.txt || echo "Arjun skipped"
-        fi
-
-    # ---------------- PHASE 3: FOCUSED ATTACK ----------------
-
-    - name: Deep 403/404 Bypass Sweep
-      run: |
-        grep -oP 'https?://[^\s\[\]]+' endpoints.txt | sort -u > clean_endpoints.txt
-        httpx -list clean_endpoints.txt -path "//" \
-          -H "X-OpenAI-Internal: true" \
-          -H "X-Forwarded-For: 127.0.0.1" \
-          -sc -cl -o bypass_findings.txt || true
-
-    - name: Nuclei Vulnerability Sweep (Smart Mode)
-      run: |
-        # Use targets_no_waf to avoid wasting time on blocked requests
-        # -nt = New Templates (Last 30 days)
-        # -tags = Focused on high-value leaks
-        nuclei -list targets_no_waf.txt -nt -severity critical,high -rl 50 -bs 10 -o nuclei_findings.txt || true
-        nuclei -list targets_no_waf.txt -tags exposure,config,token -severity critical,high -rl 50 -o nuclei_leaks.txt || true
-
-    # ---------------- PHASE 4: ALWAYS UPLOAD ----------------
-
-    - name: Package & Upload Evidence
-      if: always() 
-      run: |
-        mkdir -p results
-        mv *.txt results/ || true
-        mv *.json results/ || true
-        tar -czf security-results.tar.gz results
-
-    - name: Upload Results
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: final-bug-results
-        path: security-results.tar.gz
-        retention-days: 5
-        
+      - name: 5. Upload Artifacts (Last Resort)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: manual-test-results
+          # This saves any file that was created, even if the job failed
+          path: |
+            nuclei_results.json
+            arjun_results.json
+            n8n_report.json
+          if-no-files-found: warn
+          
