@@ -1,107 +1,50 @@
-name: Apex-oombikal
+name: Apex-Maximum-oombi
 on:
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 jobs:
-  # 1. PREPARATION: Download and Reassemble Data
-  prep-data:
+  recon-marathon:
     runs-on: ubuntu-latest
-    outputs:
-      history_ready: ${{ steps.check.outputs.exists }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Download history.txt from Google Drive
+
+      - name: Install Hunting Tools
         run: |
-          # Uses the direct download format for Google Drive
+          go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+          go install github.com/projectdiscovery/httpx/cmd/httpx@latest
+          go install github.com/haccer/subjack@latest
+          sudo mv ~/go/bin/* /usr/local/bin/
+
+      - name: Comprehensive Subdomain Discovery
+        run: |
+          mkdir -p output
+          # 1. Passive Discovery (Finding every subdomain OpenAI has registered)
+          subfinder -d openai.com -all -silent > output/all_subs.txt
+          
+          # 2. Merge with your History file subdomains
           curl -L "https://docs.google.com/uc?export=download&id=1vD2GpVHiMlR1wmoQfxcZfIpKeCRuadZx" -o history.txt
-      - name: Upload for Jobs
-        uses: actions/upload-artifact@v4
-        with:
-          name: history-file
-          path: history.txt
+          grep -oP '(?<=://)[a-zA-Z0-9.-]+\.openai\.com' history.txt >> output/all_subs.txt
+          sort -u output/all_subs.txt -o output/all_subs.txt
 
-  # 2. DEEP HISTORY & SECRET SCANNING
-  deep-scan:
-    needs: prep-data
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Download History
-        uses: actions/download-artifact@v4
-        with:
-          name: history-file
-      - name: Setup Gauplus & SecretFinder
+      - name: Subdomain Takeover & Live Check
         run: |
-          go install github.com/bp0lr/gauplus@latest
-          pip install secretfinder
-          sudo mv ~/go/bin/gauplus /usr/local/bin/
-      - name: Analyze & Fuzz
-        run: |
-          mkdir -p findings
-          # Merge existing history with fresh data
-          echo "openai.com" | gauplus -t 20 > fresh.txt
-          cat history.txt fresh.txt | sort -u > master.txt
+          # 3. Check for dangling CNAMEs (Takeover high potential)
+          subjack -w output/all_subs.txt -t 100 -timeout 30 -o output/takeover.txt -ssl || true
           
-          # Grep for critical patterns (.env, .php, API keys)
-          echo "--- SENSITIVE ENDPOINTS ---" > findings/critical.txt
-          grep -iE "\.env|\.git|\.config|\.sql|\.json" master.txt | head -n 100 >> findings/critical.txt || true
+          # 4. Filter for 'Live' subdomains that bypass Cloudflare
+          # We look for servers that don't return "cloudflare" in the headers
+          httpx -l output/all_subs.txt -silent -status-code -title -server -o output/live_targets.txt
+
+      - name: Deep Secret Extraction (JS Fuzzing)
+        run: |
+          # 5. Extract JS files from live targets and look for API Keys
+          # Using httpx to find all .js endpoints
+          cat output/live_targets.txt | awk '{print $1}' | httpx -path "/.env,/.git/config,/phpinfo.php,/robots.txt" -status-code -silent >> output/leaks_found.txt || true
           
-          # Scan top 50 historical URLs for hardcoded secrets
-          head -n 50 master.txt | xargs -I % python3 -m SecretFinder -i % -o cli >> findings/secrets.txt || true
-      - name: Upload findings
+      - name: Upload Everything
         uses: actions/upload-artifact@v4
         with:
-          name: deep-findings
-          path: findings/
-
-  # 3. API DISCOVERY (Kiterunner)
-  api-recon:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Install Kiterunner
-        run: |
-          wget https://github.com/assetnote/kiterunner/releases/download/v1.0.2/kiterunner_1.0.2_linux_amd64.tar.gz
-          tar -xvf kiterunner_1.0.2_linux_amd64.tar.gz
-          sudo mv kr /usr/local/bin/
-      - name: Scan API Routes
-        run: |
-          kr scan https://discord.verify.openai.com -w https://raw.githubusercontent.com/assetnote/wordlists/master/data/automated/httparchive/apiroutes-2020-11-20.txt > kr_api.txt || true
-      - name: Upload KR
-        uses: actions/upload-artifact@v4
-        with:
-          name: kr-results
-          path: kr_api.txt
-
-  # 4. FINAL REPORTING & COMMIT
-  reporting:
-    needs: [deep-scan, api-recon]
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Download All Results
-        uses: actions/download-artifact@v4
-        continue-on-error: true
-      - name: Generate Final Report
-        run: |
-          echo "=== APEX BUG BOUNTY REPORT ===" > final_full_report.txt
-          echo "--- CRITICAL HISTORY FINDINGS ---" >> final_full_report.txt
-          cat deep-findings/critical.txt >> final_full_report.txt || echo "None" >> final_full_report.txt
-          echo "--- JS SECRETS ---" >> final_full_report.txt
-          cat deep-findings/secrets.txt >> final_full_report.txt || echo "None" >> final_full_report.txt
-          echo "--- HIDDEN API ROUTES ---" >> final_full_report.txt
-          cat kr-results/kr_api.txt | head -n 50 >> final_full_report.txt || echo "None" >> final_full_report.txt
-      - name: Push to Repo
-        run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "Security-Bot"
-          git add final_full_report.txt
-          git commit -m "Nuclear Recon Finished - Data from Drive Analyzed" || exit 0
-          git push
+          name: maximum-recon-results
+          path: output/
           
