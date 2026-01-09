@@ -1,6 +1,4 @@
 name: OpenAI Recon – Parallel Zero-Credit Bug Hunt – 2026 Edition
-
-# Trigger manually
 on:
   workflow_dispatch:
 
@@ -14,141 +12,108 @@ jobs:
       - name: Create evidence directory
         run: mkdir -p evidence/sora
 
-      - name: Fetch Sora main page & extract JS chunks
+      - name: Fetch Sora Assets & JS Chunks
         run: |
-          curl -s -A "Mozilla/5.0 ReconBot" https://sora.com \
-            | grep -oE '(/static/chunks/[^"]+\.js|/static/js/[^"]+\.js|_next/static/chunks/[^"]+)' \
-            | sort -u > evidence/sora/sora_js_chunks.txt || true
-          echo "Found $(wc -l < evidence/sora/sora_js_chunks.txt) JS chunks"
+          # Targeting sora.com and the newer sora.openai.com subdomain
+          for domain in "sora.com" "sora.openai.com"; do
+            curl -s -A "Mozilla/5.0 ReconBot" "https://$domain" \
+              | grep -oE '(/static/chunks/[^"]+\.js|/static/js/[^"]+\.js|_next/static/chunks/[^"]+)' \
+              | sort -u >> evidence/sora/sora_js_chunks.txt || true
+          done
 
-      - name: Scan Sora chunks for IDOR/social keywords
+      - name: Deep Scan Sora for IDOR Logic
         run: |
-          echo "Scanning for IDOR-prone strings (cameo, draft, group, character, consent)..."
-          head -n 15 evidence/sora/sora_js_chunks.txt | while read -r chunk; do
+          # 2026 Specific: Searching for "Cameo" and "Remix" authorization logic
+          # These are P1 targets because they involve user likeness.
+          while read -r chunk; do
             full_url="https://sora.com${chunk}"
-            echo "→ Scraping $full_url"
-            curl -s -m 20 -A "Mozilla/5.0 ReconBot" "$full_url" \
+            curl -s -m 15 -A "Mozilla/5.0 ReconBot" "$full_url" \
+              | grep -oE '([a-zA-Z0-9_-]*_id|permission|auth|role|internal|beta|cameo|remix|draft|group|admin)' \
               | grep -iE 'cameo_id|character_id|draft_id|group_id|permission|block|consent|revoke|remix|feed|likeness|dm|private_group' \
               >> evidence/sora/sora_idor_strings.txt || true
-          done
+          done < evidence/sora/sora_js_chunks.txt
           sort -u evidence/sora/sora_idor_strings.txt > evidence/sora/sora_idor_unique.txt
-          echo "Unique matches: $(wc -l < evidence/sora/sora_idor_unique.txt)"
 
       - name: Upload Sora artifacts
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: sora-recon
           path: evidence/sora/
-          retention-days: 14
 
   atlas-browser-recon:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
       - name: Create evidence directory
         run: mkdir -p evidence/atlas
 
-      - name: Fetch Atlas/ChatGPT pages & extract keywords
+      - name: Atlas Sandbox Escape Check
         run: |
+          # Testing the "Bridge" between ChatGPT and the Atlas OS Agent
           curl -s -A "Mozilla/5.0 ReconBot" https://chatgpt.com/atlas \
-            | tee evidence/atlas/atlas_raw.html \
-            | grep -iE 'atlas|agent_mode|sandbox|filesystem|local|file://|prompt-injection|bridge|memory|escape|agentic' \
-            >> evidence/atlas/atlas_keywords.txt || true
-          curl -s -I https://chatgpt.com/atlas 2>&1 >> evidence/atlas/atlas_headers.txt || true
-          echo "Atlas keywords found: $(wc -l < evidence/atlas/atlas_keywords.txt)"
+            | grep -oE '([a-zA-Z0-9_-]*_bridge|sandbox|filesystem|local|agentic|escape|socket)' \
+            > evidence/atlas/atlas_keywords.txt || true
+          # Look for hidden API routes for the browser agent
+          curl -s https://chatgpt.com/atlas | grep -oE '/backend-api/[a-zA-Z0-9_-]+' >> evidence/atlas/atlas_keywords.txt || true
 
       - name: Upload Atlas artifacts
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: atlas-recon
           path: evidence/atlas/
-          retention-days: 14
 
   third-party-leaks-recon:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
       - name: Create evidence directory
         run: mkdir -p evidence/leaks
 
-      - name: Scrape GitHub for OpenAI leaks
+      - name: High-Impact Token Search
         run: |
-          echo "Searching GitHub for exposed OpenAI data (API keys, codenames, creds)..."
-          queries=("openai api key" "openai internal codename" "openai employee credential" "openai customer data" "openai notion leak" "openai slack bot config")
+          # Search for specific 2026 codenames: "Strawberry", "Orion", "Sora-Internal"
+          queries=("openai sk-proj" "openai internal project" "openai confidential" "openai strawberry" "openai orion")
           for q in "${queries[@]}"; do
             encoded_q=$(echo "$q" | sed 's/ /+/g')
-            curl -s -A "Mozilla/5.0 ReconBot" "https://github.com/search?q=${encoded_q}&type=code" \
-              | grep -iE 'openai|api_key|token|credential|codename|project|leak|notion|jira|slack|trello|stripe' \
-              >> evidence/leaks/github_leaks.txt || true
+            # Using a mock-search simulation (since GitHub Search API requires a token)
+            echo "Searching GitHub for: $q"
+            curl -s "https://github.com/search?q=${encoded_q}&type=code" | grep -oE 'sk-proj-[a-zA-Z0-9_-]{20,}' >> evidence/leaks/potential_keys.txt || true
           done
-          sort -u evidence/leaks/github_leaks.txt > evidence/leaks/github_leaks_unique.txt
-          echo "Unique leak matches: $(wc -l < evidence/leaks/github_leaks_unique.txt)"
 
-      - name: Upload leaks artifacts
-        if: always()
+      - name: Upload leaks
         uses: actions/upload-artifact@v4
         with:
           name: third-party-leaks
           path: evidence/leaks/
-          retention-days: 14
 
   unreleased-features-recon:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
       - name: Create evidence directory
         run: mkdir -p evidence/unreleased
 
-      - name: Fetch OpenAI main assets & scan for rumors
+      - name: Scan for Unannounced Products (The "Bonus" Hunt)
         run: |
-          curl -s -A "Mozilla/5.0 ReconBot" https://openai.com \
-            | grep -oE '(/static/chunks/[^"]+\.js|/static/js/[^"]+\.js)' \
-            | sort -u > evidence/unreleased/openai_js_chunks.txt || true
-          head -n 10 evidence/unreleased/openai_js_chunks.txt | while read -r chunk; do
-            full_url="https://openai.com${chunk}"
-            curl -s -m 20 -A "Mozilla/5.0 ReconBot" "$full_url" \
-              | grep -iE 'gpt-6|o4|strawberry|audio-model|jony-device|chatgpt-ads|custom-chips|health-bench|frontier-science|gpt-5.3|secret-project' \
-              >> evidence/unreleased/unreleased_strings.txt || true
-          done
-          sort -u evidence/unreleased/unreleased_strings.txt > evidence/unreleased/unreleased_unique.txt
-          echo "Unique unreleased matches: $(wc -l < evidence/unreleased/unreleased_unique.txt)"
+          # Grepping for future model names to get the "Information Disclosure" bounty
+          curl -s https://openai.com/sitemap.xml | grep -oE '[a-zA-Z0-9_-]*gpt-[0-9][a-zA-Z0-9_-]*' >> evidence/unreleased/model_names.txt || true
+          curl -s https://openai.com | grep -iE 'gpt-5|gpt-6|o1-pro|strawberry|search-gpt|atlas-browser' >> evidence/unreleased/unreleased_strings.txt || true
 
-      - name: Upload unreleased artifacts
-        if: always()
+      - name: Upload unreleased
         uses: actions/upload-artifact@v4
         with:
           name: unreleased-features
           path: evidence/unreleased/
-          retention-days: 14
 
   summary:
     runs-on: ubuntu-latest
+    needs: [sora-social-recon, atlas-browser-recon, third-party-leaks-recon, unreleased-features-recon]
     if: always()
     steps:
-      - name: Download all artifacts
+      - name: Download all
         uses: actions/download-artifact@v4
-
-      - name: Generate overall summary
+      - name: Generate Final Summary
         run: |
-          echo "=== OVERALL RECON SUMMARY ==="
-          echo "Sora IDOR matches: $(find . -name 'sora_idor_unique.txt' -exec wc -l {} \; || echo 0)"
-          echo "Atlas sandbox keywords: $(find . -name 'atlas_keywords.txt' -exec wc -l {} \; || echo 0)"
-          echo "Third-party leaks: $(find . -name 'github_leaks_unique.txt' -exec wc -l {} \; || echo 0)"
-          echo "Unreleased features: $(find . -name 'unreleased_unique.txt' -exec wc -l {} \; || echo 0)"
-          echo "Download individual artifacts for details!"
-
-      - name: Upload summary
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: recon-summary
-          path: . # Uploads everything, but focus on logs
-          retention-days: 14
+          echo "=== 2026 REDEMPTION SUMMARY ==="
+          echo "Sora Social IDs: $(wc -l < sora-recon/sora_idor_unique.txt || echo 0)"
+          echo "Atlas Sandbox Strings: $(wc -l < atlas-recon/atlas_keywords.txt || echo 0)"
+          echo "Leaked Key Patterns: $(wc -l < third-party-leaks/potential_keys.txt || echo 0)"
+          echo "Total Potential Findings: $(ls -R | grep .txt | wc -l)"
+          
