@@ -1,57 +1,108 @@
-name: Bug-Bounty-Recon-Optimized
-
+name: Ultimate-oombikal
 on:
-  workflow_dispatch: # Allows manual trigger
-  schedule:
-    - cron: '0 0 * * *' # Runs daily at midnight
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
-  recon:
+  # 1. SUBDOMAIN TAKEOVER
+  takeovers:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v3
-
-      - name: Set up Go
-        uses: actions/setup-go@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Run Subjack
+        run: |
+          go install github.com/haccer/subjack@latest
+          sudo mv ~/go/bin/subjack /usr/local/bin/
+          curl -s https://raw.githubusercontent.com/haccer/subjack/master/fingerprints.json > fingerprints.json
+          subjack -w recon/subs.txt -c fingerprints.json -t 100 -ssl -o takeover_results.txt || true
+      - name: Upload
+        uses: actions/upload-artifact@v4
         with:
-          go-version: '1.21'
+          name: takeover-data
+          path: takeover_results.txt
 
-      - name: Install Tools
+  # 2. GITHUB DORKING (Now using your Token)
+  github-dorks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Run GitHub Dorks
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_DORKER_TOKEN }}
         run: |
-          go install github.com/ffuf/ffuf/v2@latest
-          go install -v github.com/projectdiscovery/nuclei/v2/cmd/nuclei@latest
-          pip install arjun
+          # Searching for "openai.com" combined with sensitive keywords in code
+          mkdir -p dork_findings
+          curl -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/search/code?q=openai.com+password" >> dork_findings/leaks.json || true
+          curl -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/search/code?q=openai.com+secret_key" >> dork_findings/leaks.json || true
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: dork-data
+          path: dork_findings/leaks.json
 
-      - name: Targeted FFUF Discovery
-        # Prioritizing the target where you found favicon.ico
+  # 3. SECRET SCANNING (JS + TruffleHog)
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: TruffleHog Scan
         run: |
-          ffuf -w wordlist.txt \
-               -u https://discord.verify.openai.com/FUZZ \
-               -mc 200,301,403 \
-               -t 50 \
-               -o ffuf_discord_results.json
+          # Scanning for hardcoded secrets in the repo itself and live JS
+          docker run --rm -v "$PWD:/pwd" trufflesecurity/trufflehog:latest github --repo https://github.com/openai/openai-python > trufflehog_results.txt || true
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: secret-data
+          path: trufflehog_results.txt
 
-      - name: Nuclei Scan (High-Value Targets)
-        # Specifically targeting verified live 200/403 endpoints found in live.txt
+  # 4. DEEP VULNERABILITY SCAN (Nuclei)
+  nuclei:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Nuclei Scan
         run: |
-          echo "https://alignment.openai.com" > high_value_targets.txt
-          echo "https://auth.enterpriseservices.openai.com" >> high_value_targets.txt
-          echo "https://discord.verify.openai.com" >> high_value_targets.txt
-          echo "https://evals.openai.com" >> high_value_targets.txt
-          
-          nuclei -l high_value_targets.txt -severity high,critical -o nuclei_results.txt
+          go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+          sudo mv ~/go/bin/nuclei /usr/local/bin/
+          grep "\[200\]" live.txt | awk '{print $1}' > targets.txt
+          nuclei -list targets.txt -severity critical,high,medium -o nuclei_results.txt
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuclei-data
+          path: nuclei_results.txt
 
-      - name: Arjun Parameter Discovery
-        # Optimized Arjun to prevent the 51-minute timeout you experienced
+  # 5. FINAL MASTER REPORT
+  reporting:
+    needs: [takeovers, github-dorks, secret-scan, nuclei]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Download all data
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+      - name: Create Final Report
         run: |
-          arjun -u https://alignment.openai.com --stable --rate 10 -oJ arjun_results.json
-
-      - name: Save & Commit Results
+          echo "=== BUG BOUNTY CRITICAL FINDINGS ===" > final_full_report.txt
+          echo "--- TAKEOVERS ---" >> final_full_report.txt
+          cat takeover-data/takeover_results.txt >> final_full_report.txt || echo "None" >> final_full_report.txt
+          echo "--- GITHUB LEAKS ---" >> final_full_report.txt
+          cat dork-data/leaks.json >> final_full_report.txt || echo "None" >> final_full_report.txt
+          echo "--- CVEs FOUND ---" >> final_full_report.txt
+          cat nuclei-data/nuclei_results.txt >> final_full_report.txt || echo "None" >> final_full_report.txt
+      - name: Push to Repo
         run: |
           git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          git add *.json *.txt
-          git commit -m "Update Recon Results: $(date)" || echo "No changes to commit"
+          git config --local user.name "Security-Bot"
+          git add final_full_report.txt
+          git commit -m "All tests finished - Check report for bugs" || exit 0
           git push
           
