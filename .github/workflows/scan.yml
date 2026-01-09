@@ -1,101 +1,57 @@
-name: openai-oombi
+name: Bug-Bounty-Recon-Optimized
+
 on:
-  workflow_dispatch:
+  workflow_dispatch: # Allows manual trigger
+  schedule:
+    - cron: '0 0 * * *' # Runs daily at midnight
 
 jobs:
-  nuclei:
+  recon:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Nuclei Scan
-        run: |
-          go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
-          sudo mv ~/go/bin/nuclei /usr/local/bin/
-          nuclei -list recon/nuclei_targets.txt -severity critical,high -c 50 -bs 10 -timeout 2 -o nuclei_results.txt
-      - name: Upload
-        uses: actions/upload-artifact@v4
-        with:
-          name: nuclei-data
-          path: nuclei_results.txt
+      - name: Checkout Repository
+        uses: actions/checkout@v3
 
-  arjun:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Arjun Scan
-        run: |
-          pip install arjun
-          head -n 50 recon/arjun_targets.txt > targets.txt
-          arjun -i targets.txt -oT arjun_results.txt --stable -t 15
-      - name: Upload
-        uses: actions/upload-artifact@v4
+      - name: Set up Go
+        uses: actions/setup-go@v4
         with:
-          name: arjun-data
-          path: arjun_results.txt
+          go-version: '1.21'
 
-  fuzzing:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Ffuf Setup
+      - name: Install Tools
         run: |
           go install github.com/ffuf/ffuf/v2@latest
-          sudo mv ~/go/bin/ffuf /usr/local/bin/
-          curl -s https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/common.txt > wordlist.txt
-      - name: Run Ffuf
-        run: |
-          ffuf -w wordlist.txt -u https://discord.verify.openai.com/FUZZ -mc 200,301,403 -o ffuf_results.json
-      - name: Upload
-        uses: actions/upload-artifact@v4
-        with:
-          name: ffuf-data
-          path: ffuf_results.json
+          go install -v github.com/projectdiscovery/nuclei/v2/cmd/nuclei@latest
+          pip install arjun
 
-  reporting:
-    needs: [nuclei, arjun, fuzzing]
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Download Data
-        uses: actions/download-artifact@v4
-        continue-on-error: true
-      
-      - name: Create Human Readable Report
+      - name: Targeted FFUF Discovery
+        # Prioritizing the target where you found favicon.ico
         run: |
-          echo "==========================================" > report.txt
-          echo "       BUG BOUNTY SCAN REPORT            " >> report.txt
-          echo "       Date: $(date)                     " >> report.txt
-          echo "==========================================" >> report.txt
-          echo "" >> report.txt
-          echo "1. NUCLEI VULNERABILITIES FOUND:" >> report.txt
-          cat nuclei-data/nuclei_results.txt >> report.txt || echo "No major vulnerabilities found." >> report.txt
-          echo "" >> report.txt
-          echo "2. HIDDEN PARAMETERS FOUND (ARJUN):" >> report.txt
-          cat arjun-data/arjun_results.txt >> report.txt || echo "No hidden parameters found." >> report.txt
-          echo "" >> report.txt
-          echo "3. DIRECTORY FUZZING (FFUF):" >> report.txt
-          # Using jq to make the ffuf JSON readable in the txt file
-          cat ffuf-data/ffuf_results.json | jq -r '.results[] | "URL: \(.url) | Status: \(.status)"' >> report.txt || echo "No interesting directories found." >> report.txt
-          echo "" >> report.txt
-          echo "==========================================" >> report.txt
+          ffuf -w wordlist.txt \
+               -u https://discord.verify.openai.com/FUZZ \
+               -mc 200,301,403 \
+               -t 50 \
+               -o ffuf_discord_results.json
 
-      - name: Create n8n JSON (for automation)
+      - name: Nuclei Scan (High-Value Targets)
+        # Specifically targeting verified live 200/403 endpoints found in live.txt
         run: |
-          echo "{" > n8n_report.json
-          echo "  \"summary\": \"Scan complete. Check report.txt for details.\"," >> n8n_report.json
-          echo "  \"timestamp\": \"$(date)\"" >> n8n_report.json
-          echo "}" >> n8n_report.json
+          echo "https://alignment.openai.com" > high_value_targets.txt
+          echo "https://auth.enterpriseservices.openai.com" >> high_value_targets.txt
+          echo "https://discord.verify.openai.com" >> high_value_targets.txt
+          echo "https://evals.openai.com" >> high_value_targets.txt
+          
+          nuclei -l high_value_targets.txt -severity high,critical -o nuclei_results.txt
 
-      - name: Push Results to Repo
+      - name: Arjun Parameter Discovery
+        # Optimized Arjun to prevent the 51-minute timeout you experienced
+        run: |
+          arjun -u https://alignment.openai.com --stable --rate 10 -oJ arjun_results.json
+
+      - name: Save & Commit Results
         run: |
           git config --local user.email "action@github.com"
-          git config --local user.name "Security-Bot"
-          git add report.txt n8n_report.json
-          git commit -m "New Security Report Generated" || exit 0
+          git config --local user.name "GitHub Action"
+          git add *.json *.txt
+          git commit -m "Update Recon Results: $(date)" || echo "No changes to commit"
           git push
           
