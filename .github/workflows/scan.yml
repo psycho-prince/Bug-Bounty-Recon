@@ -1,63 +1,101 @@
-name: Security-Testing-Phase
+name: openai-oombi
 on:
   workflow_dispatch:
 
 jobs:
-  testing-and-exploitation:
+  nuclei:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Recon Data
+      - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Install Toolset
+      - name: Nuclei Scan
         run: |
           go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
-          pip install arjun
           sudo mv ~/go/bin/nuclei /usr/local/bin/
-
-      - name: 1. Nuclei Scan
-        id: nuclei
-        # continue-on-error ensures the workflow doesn't stop if Nuclei fails
-        continue-on-error: true 
-        run: |
-          nuclei -list recon/nuclei_targets.txt -severity critical,high,medium -jsonl -o nuclei_results.json -rl 50
-
-      - name: 2. Arjun Parameter Discovery
-        id: arjun
-        continue-on-error: true
-        run: |
-          head -n 25 recon/arjun_targets.txt > active_targets.txt
-          arjun -i active_targets.txt -oJ arjun_results.json --stable
-
-      - name: 3. Create Report (Runs even on failure)
-        # if: always() ensures this runs even if the previous steps crashed
-        if: always() 
-        run: |
-          echo "{" > n8n_report.json
-          echo "  \"timestamp\": \"$(date)\"," >> n8n_report.json
-          echo "  \"nuclei_findings\": $(cat nuclei_results.json | jq -s '.' || echo "[]")," >> n8n_report.json
-          echo "  \"arjun_params\": $(cat arjun_results.json || echo "[]")" >> n8n_report.json
-          echo "}" >> n8n_report.json
-
-      - name: 4. Save Results to Repo (Crash-Proof)
-        if: always()
-        run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          # Only add files that actually exist to avoid new errors
-          git add n8n_report.json nuclei_results.json arjun_results.json || true
-          git commit -m "Results (including partial data on failure)" || exit 0
-          git push
-
-      - name: 5. Upload Artifacts (Last Resort)
-        if: always()
+          nuclei -list recon/nuclei_targets.txt -severity critical,high -c 50 -bs 10 -timeout 2 -o nuclei_results.txt
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: manual-test-results
-          # This saves any file that was created, even if the job failed
-          path: |
-            nuclei_results.json
-            arjun_results.json
-            n8n_report.json
-          if-no-files-found: warn
+          name: nuclei-data
+          path: nuclei_results.txt
+
+  arjun:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Arjun Scan
+        run: |
+          pip install arjun
+          head -n 50 recon/arjun_targets.txt > targets.txt
+          arjun -i targets.txt -oT arjun_results.txt --stable -t 15
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: arjun-data
+          path: arjun_results.txt
+
+  fuzzing:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Ffuf Setup
+        run: |
+          go install github.com/ffuf/ffuf/v2@latest
+          sudo mv ~/go/bin/ffuf /usr/local/bin/
+          curl -s https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/common.txt > wordlist.txt
+      - name: Run Ffuf
+        run: |
+          ffuf -w wordlist.txt -u https://discord.verify.openai.com/FUZZ -mc 200,301,403 -o ffuf_results.json
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffuf-data
+          path: ffuf_results.json
+
+  reporting:
+    needs: [nuclei, arjun, fuzzing]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Download Data
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+      
+      - name: Create Human Readable Report
+        run: |
+          echo "==========================================" > report.txt
+          echo "       BUG BOUNTY SCAN REPORT            " >> report.txt
+          echo "       Date: $(date)                     " >> report.txt
+          echo "==========================================" >> report.txt
+          echo "" >> report.txt
+          echo "1. NUCLEI VULNERABILITIES FOUND:" >> report.txt
+          cat nuclei-data/nuclei_results.txt >> report.txt || echo "No major vulnerabilities found." >> report.txt
+          echo "" >> report.txt
+          echo "2. HIDDEN PARAMETERS FOUND (ARJUN):" >> report.txt
+          cat arjun-data/arjun_results.txt >> report.txt || echo "No hidden parameters found." >> report.txt
+          echo "" >> report.txt
+          echo "3. DIRECTORY FUZZING (FFUF):" >> report.txt
+          # Using jq to make the ffuf JSON readable in the txt file
+          cat ffuf-data/ffuf_results.json | jq -r '.results[] | "URL: \(.url) | Status: \(.status)"' >> report.txt || echo "No interesting directories found." >> report.txt
+          echo "" >> report.txt
+          echo "==========================================" >> report.txt
+
+      - name: Create n8n JSON (for automation)
+        run: |
+          echo "{" > n8n_report.json
+          echo "  \"summary\": \"Scan complete. Check report.txt for details.\"," >> n8n_report.json
+          echo "  \"timestamp\": \"$(date)\"" >> n8n_report.json
+          echo "}" >> n8n_report.json
+
+      - name: Push Results to Repo
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "Security-Bot"
+          git add report.txt n8n_report.json
+          git commit -m "New Security Report Generated" || exit 0
+          git push
           
