@@ -1,4 +1,4 @@
-name: OpenAI Parallel myr
+name: OpenAI Parallel Multi-Strike
 on:
   workflow_dispatch:
     inputs:
