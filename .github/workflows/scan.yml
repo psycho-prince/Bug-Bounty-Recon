@@ -27,38 +27,36 @@ jobs:
           PDCP_API_KEY: ${{ secrets.PDCP_API_KEY }}
           COOKIE: ${{ secrets.OPENAI_COOKIE }}
         run: |
-          # 1. FORCE CLEANUP WITH SUDO
-          sudo rm -rf output
-          mkdir -p output
+          # 1. Use a unique folder name to prevent 'Permission Denied' or 'Already Exists'
+          WORK_DIR="data_vault"
+          rm -rf $WORK_DIR || true
+          mkdir -p $WORK_DIR
           
-          # Initialize master file if it doesn't exist in the repo
-          [ -f params.txt ] && cp params.txt output/params.txt || touch output/params.txt
-          
-          # 2. API-Powered Discovery
+          # 2. Discovery
           subfinder -d openai.com -all -auth $PDCP_API_KEY -silent > subs.txt
           uncover -q "openai.com" -auth $PDCP_API_KEY -limit 300 >> subs.txt
-          cat subs.txt | sort -u | httpx -silent -t 50 -o output/alive.txt
+          cat subs.txt | sort -u | httpx -silent -t 50 -o $WORK_DIR/alive.txt
           
-          # 3. Authenticated Crawling
-          touch output/params_new.txt
-          katana -list output/alive.txt -jc -kf all -d 2 -H "Cookie: $COOKIE" -o output/params_new.txt || true
+          # 3. Authenticated Crawl
+          touch $WORK_DIR/params_new.txt
+          katana -list $WORK_DIR/alive.txt -jc -kf all -d 2 -H "Cookie: $COOKIE" -o $WORK_DIR/params_new.txt || true
           
-          # 4. Delta Logic (Only scan new parameters)
-          if [ -s output/params_new.txt ]; then
-             # Create scan list by comparing new links to the master list
-             grep -vFf output/params.txt output/params_new.txt > output/to_scan.txt || touch output/to_scan.txt
+          # 4. Delta Logic using the existing params.txt in the repo root
+          touch params.txt
+          if [ -s $WORK_DIR/params_new.txt ]; then
+             grep -vFf params.txt $WORK_DIR/params_new.txt > $WORK_DIR/to_scan.txt || touch $WORK_DIR/to_scan.txt
           else
-             touch output/to_scan.txt
+             touch $WORK_DIR/to_scan.txt
           fi
           
-          # Update master list for persistence
-          cat output/params.txt output/params_new.txt | sort -u > output/params_updated.txt
+          # 5. Prepare master update
+          cat params.txt $WORK_DIR/params_new.txt | sort -u > $WORK_DIR/master_params_updated.txt
 
       - name: Save Recon Data
         uses: actions/upload-artifact@v4
         with:
           name: targets
-          path: output/
+          path: data_vault/
 
   fuzz:
     needs: recon
@@ -72,7 +70,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: targets
-          path: output/
+          path: data_vault/
 
       - name: Setup & Update Nuclei
         run: |
@@ -86,17 +84,15 @@ jobs:
           PDCP_API_KEY: ${{ secrets.PDCP_API_KEY }}
           COOKIE: ${{ secrets.OPENAI_COOKIE }}
         run: |
-          # Only scan if to_scan.txt exists and has content
-          if [ -s output/to_scan.txt ]; then
-            nuclei -l output/to_scan.txt \
+          mkdir -p hits
+          if [ -s data_vault/to_scan.txt ]; then
+            nuclei -l data_vault/to_scan.txt \
               -tags ${{ matrix.vuln_type }},cve2025,cve2026 \
               -auth $PDCP_API_KEY \
               -interactsh-server oast.fun \
               -header "Cookie: $COOKIE" \
               -rate-limit 100 \
-              -o output/hit_${{ matrix.vuln_type }}.txt
-          else
-             echo "No new targets discovered."
+              -o hits/${{ matrix.vuln_type }}_hits.txt
           fi
 
       - name: Atomic Save Findings
@@ -104,15 +100,19 @@ jobs:
           git config --local user.email "bot@hacker.ai"
           git config --local user.name "Exploit-Bot"
           
-          # Sync Master List update from Recon
-          if [ -f output/params_updated.txt ]; then
-            mv output/params_updated.txt params.txt
-          fi
-          
           for i in {1..15}; do
             git fetch origin main
             git rebase origin/main || (git rebase --abort && git reset --hard origin/main)
-            git add output/*.txt params.txt
+            
+            # Sync the new master params
+            [ -f data_vault/master_params_updated.txt ] && cp data_vault/master_params_updated.txt params.txt
+            
+            # Add hits if they exist
+            mkdir -p final_results
+            [ "$(ls -A hits/)" ] && cp hits/*.txt final_results/
+            
+            git add params.txt final_results/
+            
             if git commit -m "Confirmed Hit: ${{ matrix.vuln_type }} $(date)"; then
               git push origin main && break
             else
