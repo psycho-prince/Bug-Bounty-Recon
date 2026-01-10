@@ -27,36 +27,29 @@ jobs:
           PDCP_API_KEY: ${{ secrets.PDCP_API_KEY }}
           COOKIE: ${{ secrets.OPENAI_COOKIE }}
         run: |
-          # 1. FIX: Nuke any existing 'output' file or directory to prevent Exit Code 2
           rm -rf output
           mkdir -p output
           
-          # 2. Secret Check (Will print 'Found' or 'Missing' in logs)
-          if [ -z "$PDCP_API_KEY" ]; then echo "PDCP KEY MISSING"; else echo "PDCP KEY FOUND"; fi
+          # Load existing master list
+          touch output/params.txt
           
-          # 3. Cloud Discovery
-          subfinder -d openai.com -all -auth $PDCP_API_KEY -silent > subs.txt || echo "openai.com" > subs.txt
-          uncover -q "openai.com" -auth $PDCP_API_KEY -limit 300 >> subs.txt || true
+          # Discovery
+          subfinder -d openai.com -all -auth $PDCP_API_KEY -silent > subs.txt
+          uncover -q "openai.com" -auth $PDCP_API_KEY -limit 300 >> subs.txt
           cat subs.txt | sort -u | httpx -silent -t 50 -o output/alive.txt
           
-          # 4. Crawling with persisted Master List
-          # We try to get the existing params.txt from the repo branch
-          touch output/params.txt
-          katana -list output/alive.txt -jc -kf all -d 2 -H "Cookie: $COOKIE" -o output/params_new.txt || touch output/params_new.txt
+          # Crawl
+          touch output/params_new.txt
+          katana -list output/alive.txt -jc -kf all -d 2 -H "Cookie: $COOKIE" -o output/params_new.txt || true
           
-          # 5. Delta Logic (Only scan what is actually new)
+          # Delta Logic
           if [ -s output/params_new.txt ]; then
-            # If params.txt (master) is empty, scan everything. Otherwise, find new lines.
-            if [ -s output/params.txt ]; then
-              grep -vFf output/params.txt output/params_new.txt > output/to_scan.txt || touch output/to_scan.txt
-            else
-              cp output/params_new.txt output/to_scan.txt
-            fi
+            grep -vFf output/params.txt output/params_new.txt > output/to_scan.txt || touch output/to_scan.txt
           else
             touch output/to_scan.txt
           fi
           
-          # Update Master List
+          # Save Master
           cat output/params.txt output/params_new.txt | sort -u > temp.txt && mv temp.txt output/params.txt
 
       - name: Save Recon Data
@@ -85,7 +78,7 @@ jobs:
           echo "$HOME/go/bin" >> $GITHUB_PATH
           $HOME/go/bin/nuclei -ut
 
-      - name: Advanced Vulnerability Scanning (2025-2026 CVEs)
+      - name: Advanced Vulnerability Scanning
         env:
           ISH_TOKEN: ${{ secrets.INTERACTSH_TOKEN }}
           PDCP_API_KEY: ${{ secrets.PDCP_API_KEY }}
@@ -93,24 +86,29 @@ jobs:
         run: |
           if [ -s output/to_scan.txt ]; then
             nuclei -l output/to_scan.txt \
-              -tags ${{ matrix.vuln_type }},cve2025,cve2026,dast \
+              -tags ${{ matrix.vuln_type }},cve2025,cve2026 \
               -auth $PDCP_API_KEY \
               -interactsh-server oast.fun \
               -header "Cookie: $COOKIE" \
               -rate-limit 100 \
               -o output/hit_${{ matrix.vuln_type }}.txt
           else
-            echo "No new targets found to scan."
+            echo "Nothing new to scan."
           fi
 
       - name: Atomic Save Findings
         run: |
           git config --local user.email "bot@hacker.ai"
           git config --local user.name "Exploit-Bot"
-          # Detailed save logic for parallel jobs
-          for i in {1..10}; do
-            git pull origin main --rebase
-            git add output/
-            git commit -m "Confirmed Hit: ${{ matrix.vuln_type }} $(date)" && git push origin main && break || sleep 15
+          for i in {1..15}; do
+            git fetch origin main
+            git rebase origin/main || (git rebase --abort && git reset --hard origin/main)
+            git add output/*.txt
+            if git commit -m "Confirmed Hit: ${{ matrix.vuln_type }} $(date)"; then
+              git push origin main && break
+            else
+              break
+            fi
+            sleep $(( (RANDOM % 20) + 10 ))
           done
           
