@@ -33,7 +33,7 @@ jobs:
         run: cat subs.txt | sort -u | httpx -silent -o alive.txt
 
       - name: 4. Authenticated Crawl
-        run: katana -list alive.txt -jc -kf all -d 2 -H "Cookie: ${{ secrets.OPENAI_COOKIE }}" -o params_new.txt || touch params_new.txt
+        run: katana -list alive.txt -jc -kf all -d 2 -H "Cookie:${{ secrets.OPENAI_COOKIE }}" -o params_new.txt || touch params_new.txt
 
       - name: 5. Deduplication
         run: |
