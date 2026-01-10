@@ -12,10 +12,10 @@ jobs:
   recon:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Tools
+      - name: Setup Go Tools
         run: |
           go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
           go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
@@ -23,43 +23,33 @@ jobs:
           go install -v github.com/projectdiscovery/uncover/cmd/uncover@latest
           echo "$HOME/go/bin" >> $GITHUB_PATH
 
-      - name: Build Target Delta
-        env:
-          PDCP_API_KEY: ${{ secrets.PDCP_API_KEY }}
-          COOKIE: ${{ secrets.OPENAI_COOKIE }}
-        run: |
-          # Use /tmp - it's guaranteed to be writable and empty
-          TMP_RECON="/tmp/recon_$(date +%s)"
-          mkdir -p "$TMP_RECON"
-          
-          # 1. API-Powered Discovery
-          subfinder -d openai.com -all -auth $PDCP_API_KEY -silent > "$TMP_RECON/subs.txt"
-          uncover -q "openai.com" -auth $PDCP_API_KEY -limit 300 >> "$TMP_RECON/subs.txt" || true
-          cat "$TMP_RECON/subs.txt" | sort -u | httpx -silent -t 50 -o "$TMP_RECON/alive.txt"
-          
-          # 2. Authenticated Crawl
-          katana -list "$TMP_RECON/alive.txt" -jc -kf all -d 2 -H "Cookie: $COOKIE" -o "$TMP_RECON/params_new.txt" || touch "$TMP_RECON/params_new.txt"
-          
-          # 3. Delta Logic (Check against existing params.txt in repo)
-          touch params.txt
-          if [ -s "$TMP_RECON/params_new.txt" ]; then
-             grep -vFf params.txt "$TMP_RECON/params_new.txt" > "$TMP_RECON/to_scan.txt" || cp "$TMP_RECON/params_new.txt" "$TMP_RECON/to_scan.txt"
-          else
-             touch "$TMP_RECON/to_scan.txt"
-          fi
-          
-          # 4. Prepare master update and move to workspace for artifact
-          cat params.txt "$TMP_RECON/params_new.txt" | sort -u > "$TMP_RECON/master_params_updated.txt"
-          
-          # Move everything back to a NEW folder in workspace just for the artifact step
-          mkdir -p "$GITHUB_WORKSPACE/final_vault"
-          cp -r "$TMP_RECON/." "$GITHUB_WORKSPACE/final_vault/"
+      - name: 1. Passive Discovery
+        run: subfinder -d openai.com -all -auth ${{ secrets.PDCP_API_KEY }} -silent -o subs.txt
 
-      - name: Save Recon Data
+      - name: 2. Cloud Discovery
+        run: uncover -q "openai.com" -auth ${{ secrets.PDCP_API_KEY }} -limit 300 >> subs.txt || echo "done"
+
+      - name: 3. Filter Alive
+        run: cat subs.txt | sort -u | httpx -silent -o alive.txt
+
+      - name: 4. Authenticated Crawl
+        run: katana -list alive.txt -jc -kf all -d 2 -H "Cookie: ${{ secrets.OPENAI_COOKIE }}" -o params_new.txt || touch params_new.txt
+
+      - name: 5. Deduplication
+        run: |
+          touch params.txt
+          grep -vFf params.txt params_new.txt > to_scan.txt || cp params_new.txt to_scan.txt
+
+      - name: 6. Update Master
+        run: cat params.txt params_new.txt | sort -u > master_updated.txt
+
+      - name: Upload Targets
         uses: actions/upload-artifact@v4
         with:
           name: targets
-          path: final_vault/
+          path: |
+            to_scan.txt
+            master_updated.txt
 
   fuzz:
     needs: recon
@@ -69,65 +59,37 @@ jobs:
       matrix:
         vuln_type: [sqli, xss, ssti, ssrf, idor, takeover, exposure]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Targets
+        uses: actions/download-artifact@v4
         with:
           name: targets
-          path: final_vault/
 
-      - name: Setup & Update Nuclei
+      - name: Setup Nuclei
         run: |
           go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
-          echo "$HOME/go/bin" >> $GITHUB_PATH
           $HOME/go/bin/nuclei -ut
+          echo "$HOME/go/bin" >> $GITHUB_PATH
 
-      - name: Advanced Vulnerability Scanning
-        env:
-          ISH_TOKEN: ${{ secrets.INTERACTSH_TOKEN }}
-          PDCP_API_KEY: ${{ secrets.PDCP_API_KEY }}
-          COOKIE: ${{ secrets.OPENAI_COOKIE }}
+      - name: Vulnerability Scan
         run: |
-          # Use /tmp for hits too to avoid repo permission locks
-          TMP_HITS="/tmp/hits_${{ matrix.vuln_type }}"
-          mkdir -p "$TMP_HITS"
-          
-          if [ -s final_vault/to_scan.txt ]; then
-            nuclei -l final_vault/to_scan.txt \
-              -tags ${{ matrix.vuln_type }},cve2025,cve2026 \
-              -auth $PDCP_API_KEY \
-              -interactsh-server oast.fun \
-              -header "Cookie: $COOKIE" \
-              -rate-limit 100 \
-              -o "$TMP_HITS/result.txt"
+          if [ -s to_scan.txt ]; then
+            nuclei -l to_scan.txt -tags ${{ matrix.vuln_type }},cve2025,cve2026 -auth ${{ secrets.PDCP_API_KEY }} -interactsh-server oast.fun -header "Cookie: ${{ secrets.OPENAI_COOKIE }}" -o results.txt
           fi
-          
-          # Prepare for commit
-          mkdir -p results_to_save
-          [ -f "$TMP_HITS/result.txt" ] && cp "$TMP_HITS/result.txt" "results_to_save/${{ matrix.vuln_type }}_hits.txt" || true
 
-      - name: Atomic Save Findings
+      - name: Commit Findings
         run: |
           git config --local user.email "bot@hacker.ai"
           git config --local user.name "Exploit-Bot"
-          
           for i in {1..15}; do
             git fetch origin main
             git rebase origin/main || (git rebase --abort && git reset --hard origin/main)
-            
-            # Sync master list from recon
-            [ -f final_vault/master_params_updated.txt ] && cp final_vault/master_params_updated.txt params.txt
-            
-            # Add any new hits
+            [ -f master_updated.txt ] && cp master_updated.txt params.txt
             mkdir -p vulnerabilities
-            [ "$(ls -A results_to_save/)" ] && cp results_to_save/*.txt vulnerabilities/
-            
+            [ -f results.txt ] && cp results.txt vulnerabilities/${{ matrix.vuln_type }}_hits.txt
             git add params.txt vulnerabilities/
-            
-            if git commit -m "Confirmed Hit: ${{ matrix.vuln_type }} $(date)"; then
-              git push origin main && break
-            else
-              break
-            fi
-            sleep $(( (RANDOM % 20) + 10 ))
+            git commit -m "Hit: ${{ matrix.vuln_type }} $(date)" && git push origin main && break || sleep 15
           done
           
