@@ -38,7 +38,7 @@ jobs:
         run: sort -u subs.txt | httpx -silent -o alive.txt || touch alive.txt
 
       - name: Crawl
-        run: katana -list alive.txt -jc -kf all -d 3 -H "Cookie: $AUTH_COOKIE" -o params_new.txt || touch params_new.txt
+        run: katana -list alive.txt -jc -kf all -d 3 -H "Cookie:$OPENAI_COOKIE" -o params_new.txt || touch params_new.txt
 
       - name: Dedup & Index
         run: |
