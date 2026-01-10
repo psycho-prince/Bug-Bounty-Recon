@@ -9,11 +9,11 @@ permissions:
   contents: write
 
 jobs:
-  # RECON JOB: Gathers targets and finds new links
   recon:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      
       - name: Setup Tools
         run: |
           go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
@@ -27,37 +27,41 @@ jobs:
           PDCP_API_KEY: ${{ secrets.PDCP_API_KEY }}
           COOKIE: ${{ secrets.OPENAI_COOKIE }}
         run: |
-          mkdir -p output/
-          [ -f output/params.txt ] && mv output/params.txt output/params_old.txt || touch output/params_old.txt
+          # Robust directory and file handling
+          mkdir -p output
           
-          # Rapid Recon with PDCP Cloud
+          if [ -f output/params.txt ]; then
+            mv output/params.txt output/params_old.txt
+          else
+            touch output/params_old.txt
+          fi
+          
+          # 1. Cloud-based discovery
           subfinder -d openai.com -all -auth $PDCP_API_KEY -silent > subs.txt
           uncover -q "openai.com" -auth $PDCP_API_KEY -limit 300 >> subs.txt
-          cat subs.txt | sort -u | httpx -silent -o output/alive.txt
+          cat subs.txt | sort -u | httpx -silent -t 50 -o output/alive.txt
           
-          # Authenticated Crawl
-          katana -list output/alive.txt -jc -kf all -d 3 -H "Cookie: $COOKIE" -o output/params_new.txt
+          # 2. Authenticated Deep Crawl
+          katana -list output/alive.txt -jc -kf all -d 2 -H "Cookie: $COOKIE" -o output/params_new.txt || touch output/params_new.txt
           
-          # Deduplication: Only scan what hasn't been scanned before
+          # 3. Delta Logic: Only scan new items to save time
           grep -vFf output/params_old.txt output/params_new.txt > output/to_scan.txt || cp output/params_new.txt output/to_scan.txt
           
-          # Update the master list
-          cat output/params_old.txt output/to_scan.txt | sort -u > output/params.txt
+          # 4. Persistence Merge
+          cat output/params_old.txt output/params_new.txt | sort -u > output/params.txt
 
-      - name: Save Recon for Fuzzers
+      - name: Save Recon Data
         uses: actions/upload-artifact@v4
         with:
           name: targets
           path: output/
 
-  # FUZZ JOB: Runs 7 parallel servers at once
   fuzz:
     needs: recon
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        # Each one of these runs on a DIFFERENT server at the SAME time
         vuln_type: [sqli, xss, ssti, ssrf, idor, takeover, exposure]
     steps:
       - uses: actions/checkout@v4
@@ -75,7 +79,7 @@ jobs:
           PDCP_API_KEY: ${{ secrets.PDCP_API_KEY }}
           COOKIE: ${{ secrets.OPENAI_COOKIE }}
         run: |
-          # The -v flag ensures we only save verified hits (reduces false positives)
+          # Using -v for validation to stop false positives
           nuclei -l output/to_scan.txt \
             -tags ${{ matrix.vuln_type }} \
             -auth $PDCP_API_KEY \
@@ -90,8 +94,10 @@ jobs:
         run: |
           git config --local user.email "bot@hacker.ai"
           git config --local user.name "Exploit-Bot"
-          git pull origin main --rebase
-          git add output/
-          git commit -m "Confirmed Hit: ${{ matrix.vuln_type }} $(date)" || echo "No hits"
-          git push origin main
+          # Retry loop handles 7 jobs pushing to Git at once
+          for i in {1..10}; do
+            git pull origin main --rebase
+            git add output/
+            git commit -m "Vuln-Hit: ${{ matrix.vuln_type }} $(date)" && git push origin main && break || sleep 15
+          done
           
