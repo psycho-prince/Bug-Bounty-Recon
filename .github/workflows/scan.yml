@@ -27,30 +27,32 @@ jobs:
           PDCP_API_KEY: ${{ secrets.PDCP_API_KEY }}
           COOKIE: ${{ secrets.OPENAI_COOKIE }}
         run: |
-          rm -rf output
+          # 1. FORCE CLEANUP WITH SUDO
+          sudo rm -rf output
           mkdir -p output
           
-          # Load existing master list
-          touch output/params.txt
+          # Initialize master file if it doesn't exist in the repo
+          [ -f params.txt ] && cp params.txt output/params.txt || touch output/params.txt
           
-          # Discovery
+          # 2. API-Powered Discovery
           subfinder -d openai.com -all -auth $PDCP_API_KEY -silent > subs.txt
           uncover -q "openai.com" -auth $PDCP_API_KEY -limit 300 >> subs.txt
           cat subs.txt | sort -u | httpx -silent -t 50 -o output/alive.txt
           
-          # Crawl
+          # 3. Authenticated Crawling
           touch output/params_new.txt
           katana -list output/alive.txt -jc -kf all -d 2 -H "Cookie: $COOKIE" -o output/params_new.txt || true
           
-          # Delta Logic
+          # 4. Delta Logic (Only scan new parameters)
           if [ -s output/params_new.txt ]; then
-            grep -vFf output/params.txt output/params_new.txt > output/to_scan.txt || touch output/to_scan.txt
+             # Create scan list by comparing new links to the master list
+             grep -vFf output/params.txt output/params_new.txt > output/to_scan.txt || touch output/to_scan.txt
           else
-            touch output/to_scan.txt
+             touch output/to_scan.txt
           fi
           
-          # Save Master
-          cat output/params.txt output/params_new.txt | sort -u > temp.txt && mv temp.txt output/params.txt
+          # Update master list for persistence
+          cat output/params.txt output/params_new.txt | sort -u > output/params_updated.txt
 
       - name: Save Recon Data
         uses: actions/upload-artifact@v4
@@ -84,6 +86,7 @@ jobs:
           PDCP_API_KEY: ${{ secrets.PDCP_API_KEY }}
           COOKIE: ${{ secrets.OPENAI_COOKIE }}
         run: |
+          # Only scan if to_scan.txt exists and has content
           if [ -s output/to_scan.txt ]; then
             nuclei -l output/to_scan.txt \
               -tags ${{ matrix.vuln_type }},cve2025,cve2026 \
@@ -93,17 +96,23 @@ jobs:
               -rate-limit 100 \
               -o output/hit_${{ matrix.vuln_type }}.txt
           else
-            echo "Nothing new to scan."
+             echo "No new targets discovered."
           fi
 
       - name: Atomic Save Findings
         run: |
           git config --local user.email "bot@hacker.ai"
           git config --local user.name "Exploit-Bot"
+          
+          # Sync Master List update from Recon
+          if [ -f output/params_updated.txt ]; then
+            mv output/params_updated.txt params.txt
+          fi
+          
           for i in {1..15}; do
             git fetch origin main
             git rebase origin/main || (git rebase --abort && git reset --hard origin/main)
-            git add output/*.txt
+            git add output/*.txt params.txt
             if git commit -m "Confirmed Hit: ${{ matrix.vuln_type }} $(date)"; then
               git push origin main && break
             else
