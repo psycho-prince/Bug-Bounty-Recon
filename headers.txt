@@ -1,0 +1,18 @@
+HTTP/2 500 
+date: Sun, 11 Jan 2026 12:26:02 GMT
+content-type: text/html; charset=utf-8
+x-frame-options: SAMEORIGIN
+content-security-policy: frame-ancestors 'self'
+referrer-policy: origin-when-cross-origin
+x-origin-locale: default
+x-middleware-rewrite: /en?amp=test
+vary: Accept-Encoding
+cf-cache-status: BYPASS
+set-cookie: __cf_bm=pgWgjMNyIuYS9D4Aos0ZraS.pSLuH0r8hq4comAlMDo-1768134362-1.0.1.1-muwdrhrvyc8HtV4WXQIoxPdo.IEQKf2eNXQI2l7C_So1g9qGfaQt6995wdnMa8GyP77.ff4kzgHWPGL6AERAInW.aLxsrC9YC8rGwSqHrk0; path=/; expires=Sun, 11-Jan-26 12:56:02 GMT; domain=.academy.openai.com; HttpOnly; Secure; SameSite=None
+strict-transport-security: max-age=2592000; includeSubDomains; preload
+x-content-type-options: nosniff
+set-cookie: _cfuvid=hALjOycu8xbwOP_Xth1HRnV0f0ATPIPIEmIxwS63a5U-1768134362337-0.0.1.1-604800000; path=/; domain=.academy.openai.com; HttpOnly; Secure; SameSite=None
+server: cloudflare
+cf-ray: 9bc46673ce2da6ee-ORD
+alt-svc: h3=":443"; ma=86400
+
