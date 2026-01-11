@@ -1,0 +1,23 @@
+{
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "nodejsscan",
+          "version": "0.4.3",
+          "informationUri": "https://github.com/ajinabraham/njsscan",
+          "semanticVersion": "0.4.3"
+        }
+      },
+      "invocations": [
+        {
+          "executionSuccessful": true,
+          "endTimeUtc": "2026-01-11T09:25:03Z"
+        }
+      ],
+      "results": []
+    }
+  ],
+  "version": "2.1.0",
+  "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json"
+}
