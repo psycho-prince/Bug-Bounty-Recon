@@ -34,7 +34,7 @@ jobs:
       - name: 🛠️ Setup Templates
         run: nuclei -ut # Ensures templates are fresh and paths are correct
 
-      - name: 📂 Step 1: Code Extraction (Fixed Pathing)
+      - name: 📂 Step 1:Code Extraction (Fixed Pathing)
         run: |
           mkdir -p ./source_code/raw
           # Using -d 3 to go deeper into the academy site
@@ -45,7 +45,7 @@ jobs:
             head -n 50 ./source_code/endpoints.txt | xargs -I % wget -q -P ./source_code/raw/ % || true
           fi
 
-      - name: 🔍 Step 2: Secret & SAST Scan
+      - name: 🔍 Step 2:Secret & SAST Scan
         run: |
           # Only run if directory exists and isn't empty
           if [ "$(ls -A ./source_code/raw/)" ]; then
@@ -55,7 +55,7 @@ jobs:
             echo "No JS files found to analyze." > discovered_secrets.txt
           fi
 
-      - name: 🛡️ Step 3: Header Injection (Updated Path)
+      - name: 🛡️ Step 3:Header Injection (Updated Path)
         run: |
           # Using the generic 'fuzzing' and 'injection' tags instead of broken file paths
           nuclei -u "$TARGET_URL" \
@@ -65,7 +65,7 @@ jobs:
             -interactsh-server oast.fun \
             -o header_exploits.txt || true
 
-      - name: ☢️ Step 4: High-Intensity Scan (Fixed Tags)
+      - name: ☢️ Step 4:High-Intensity Scan (Fixed Tags)
         run: |
           # Removed the '-dast' flag because it limits template selection too strictly
           nuclei -u "$TARGET_URL" \
@@ -75,7 +75,7 @@ jobs:
             -rl 50 -bs 25 \
             -o nuclei_results.txt
 
-      - name: 💾 Step 5: Secure Result Sync
+      - name: 💾 Step 5:Secure Result Sync
         if: always()
         run: |
           git config --local user.email "bot@hacker.ai"
