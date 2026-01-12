@@ -27,13 +27,13 @@ jobs:
           go install github.com/ffuf/ffuf/v2@latest
           echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
 
-      - name: 🗺️ Phase 1: Deep Discovery (Katana)
+      - name: 🗺️ Phase 1:Deep Discovery (Katana)
         run: |
           # Deep crawl Sora and Atlas documentation to find hidden JSON endpoints
           katana -u "https://sora.openai.com" -jc -d 3 -o sora_endpoints.txt
           katana -u "https://platform.openai.com/docs" -jc -d 3 -o api_endpoints.txt
 
-      - name: 🎥 Phase 2: Sora Privacy Breach (FFUF)
+      - name: 🎥 Phase 2:Sora Privacy Breach (FFUF)
         run: |
           # Testing for IDOR on Cameos and Drafts
           # We check if changing the ID returns a 200 (Success) instead of 403 (Forbidden)
@@ -43,7 +43,7 @@ jobs:
                -H "Authorization: Bearer ${{ secrets.SORA_TOKEN }}" \
                -mc 200 -o sora_idor_hits.json || true
 
-      - name: 🛡️ Phase 3: Atlas Agent Hijack (Nuclei)
+      - name: 🛡️ Phase 3:Atlas Agent Hijack (Nuclei)
         run: |
           # Using active CVE templates for Sandbox Escapes and Origin Bypasses
           # We specifically target the Atlas 'navigate' and 'execute' commands
@@ -52,7 +52,7 @@ jobs:
             -H "Authorization: Bearer ${{ secrets.OPENAI_API_KEY }}" \
             -o atlas_vulnerabilities.txt || true
 
-      - name: ☢️ Phase 4: Active CVE Fuzzing (Core API)
+      - name: ☢️ Phase 4:Active CVE Fuzzing (Core API)
         run: |
           # Fuzzing the core API for SSRF and Header Injection
           nuclei -u "https://api.openai.com/v1/completions" \
