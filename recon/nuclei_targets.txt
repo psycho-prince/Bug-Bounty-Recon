@@ -1,7 +1,0 @@
-https://alignment.openai.com
-https://auth.enterpriseservices.openai.com
-https://discord.verify.openai.com
-https://evals.openai.com
-https://external.auth.openai.com
-https://guardrails.openai.com
-https://em.openai.com
