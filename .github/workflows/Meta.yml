@@ -1,0 +1,38 @@
+name: Meta Recon Engine
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */6 * * *'
+
+jobs:
+  recon:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Toolchain
+        run: |
+          sudo apt update
+          sudo apt install -y jq
+          go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+          go install github.com/projectdiscovery/httpx/cmd/httpx@latest
+          go install github.com/projectdiscovery/katana/cmd/katana@latest
+          go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+
+      - name: Run Recon
+        run: |
+          subfinder -dL scope_expanded.txt -all -silent > subs.txt
+          httpx -l subs.txt -silent -status-code -title -tech-detect -json > alive.json
+          katana -l alive.json -jc -kf -ef woff,css,png,jpg -o crawl.txt
+          nuclei -l alive.json -severity medium,high,critical -o nuclei.txt
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: meta-recon
+          path: |
+            subs.txt
+            alive.json
+            crawl.txt
+            nuclei.txt
