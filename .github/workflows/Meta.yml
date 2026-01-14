@@ -27,7 +27,7 @@ jobs:
       - name: Install System Dependencies
         run: |
           sudo apt update
-          sudo apt install -y jq unzip python3-pip
+          sudo apt install -y jq unzip python3-pip libpcap-dev
 
       - name: Install Recon Toolchain
         run: |
@@ -39,7 +39,7 @@ jobs:
           go install github.com/projectdiscovery/naabu/v2/cmd/naabu@latest
           pip3 install uro
 
-      - name: Verify Tools
+      - name: Verify Toolchain
         run: |
           which subfinder
           which httpx
